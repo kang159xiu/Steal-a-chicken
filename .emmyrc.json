@@ -1,0 +1,9 @@
+{
+  "diagnostics": {
+    "disable": [
+      "undefined-global",
+      "undefined-global",
+      "undefined-global"
+    ]
+  }
+}

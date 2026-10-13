@@ -1,0 +1,3 @@
+{
+    "lua_analyzer.codeLinting.ignoreGlobal": "UnityEngine;com;Achievement;Animation;Archive;Array;Audio;Camera;Character;Chat;Creature;Currency;CustomItem;CustomProperty;Damage;Element;Engine;Events;FakeCharacter;FuncElement;Guide;Inventory;Log;LogicElement;MiscService;Music;Particle;PhysicsElement;PlayInteractive;Rank;Setting;Share;Shop;Skill;SkyBox;Story;System;Task;Team;TimerManager;TriggerBox;UI;UMath;Voice"
+}

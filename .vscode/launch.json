@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lua",
+      "request": "launch",
+      "tag": "normal",
+      "name": "元件脚本调试",
+      "description": "元件脚本调试",
+      "cwd": "${workspaceFolder}",
+      "luaFileExtension": "",
+      "connectionPort": 40818,
+      "stopOnEntry": false,
+      "useCHook": true,
+      "autoPathMode": true,
+      "distinguishSameNameFile": false,
+      "pathCaseSensitivity": false,
+      "updateTips": false
+    }
+  ]
+}
