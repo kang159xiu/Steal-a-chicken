@@ -30,7 +30,8 @@ function PickupController:ValidateConfig(context)
     if type(config.InteractionEnabled) ~= "boolean" then
         errors[#errors + 1] = "Theft.InteractionEnabled 必须是 boolean"
     end
-    for _, field in ipairs({ "PickupUiGroupId", "PickupButtonId", "PickupProgressId" }) do
+    for _, field in ipairs({ "PickupUiGroupId", "PickupButtonId", "PickupProgressId",
+        "CarryUiGroupId", "ManualDropButtonId" }) do
         if not IsPositiveInteger(config[field]) then
             errors[#errors + 1] = "Theft." .. field .. " 必须是正整数"
         end
@@ -41,24 +42,11 @@ function PickupController:ValidateConfig(context)
     if type(config.ProgressTickSeconds) ~= "number" or config.ProgressTickSeconds <= 0 then
         errors[#errors + 1] = "Theft.ProgressTickSeconds 必须大于0"
     end
+    if type(config.DistanceCheckSeconds) ~= "number" or config.DistanceCheckSeconds <= 0 then
+        errors[#errors + 1] = "Theft.DistanceCheckSeconds 必须大于0"
+    end
     if type(config.MaxHorizontalDistance) ~= "number" or config.MaxHorizontalDistance <= 0 then
         errors[#errors + 1] = "Theft.MaxHorizontalDistance 必须大于0"
-    end
-    if type(config.ProgressValues) ~= "table" or #config.ProgressValues == 0 then
-        errors[#errors + 1] = "Theft.ProgressValues 不能为空"
-    else
-        local previous = 0
-        for index, value in ipairs(config.ProgressValues) do
-            if type(value) ~= "number" or value <= previous or value > 100 then
-                errors[#errors + 1] = "Theft.ProgressValues 必须递增且范围为1到100，index="
-                    .. tostring(index)
-                break
-            end
-            previous = value
-        end
-        if config.ProgressValues[#config.ProgressValues] ~= 100 then
-            errors[#errors + 1] = "Theft.ProgressValues 最后一项必须为100"
-        end
     end
     return #errors == 0, errors
 end
@@ -68,6 +56,7 @@ function PickupController:Start(context)
 
     local config = GameConfig.Theft
     if not config.InteractionEnabled then
+        UI:OnShow({ config.CarryUiGroupId }, false)
         UI:SetProgressCurrentValue({ config.PickupProgressId }, 0)
         UI:OnShow({ config.PickupUiGroupId }, false)
         Log:PrintLog("[PickupController] 4A-1 拾取交互关闭，未登记UI与网络回调")
@@ -75,17 +64,23 @@ function PickupController:Start(context)
     end
     local runtime = {
         TargetElementId = nil,
+        TargetOperation = nil,
         Generation = 0,
         RefreshBlocked = false,
         Holding = false,
         AwaitingResult = false,
         HoldStartTime = nil,
-        ProgressIndex = 0,
         CheckTimerId = nil,
+        ProgressTimerId = nil,
         PressedCallback = nil,
         ReleasedCallback = nil,
         ShowCallback = nil,
         ResultCallback = nil,
+        CarryVersion = -1,
+        CarryRootId = nil,
+        CarryOperation = nil,
+        CarryReady = false,
+        DropPending = false,
     }
     context.Services.PickupController = runtime
 
@@ -101,13 +96,13 @@ function PickupController:Start(context)
     local function ResetProgress()
         runtime.Holding = false
         runtime.HoldStartTime = nil
-        runtime.ProgressIndex = 0
         UI:SetProgressCurrentValue({ config.PickupProgressId }, 0)
     end
 
     local function HideInteraction()
         ResetProgress()
         runtime.TargetElementId = nil
+        runtime.TargetOperation = nil
         runtime.AwaitingResult = false
         UI:OnShow({ config.PickupUiGroupId }, false)
     end
@@ -116,6 +111,7 @@ function PickupController:Start(context)
         System:SendToServer(context.NetMsg.Messages.PickupCancel, {
             elementId = rootId,
             generation = runtime.Generation,
+            operation = runtime.TargetOperation,
             reason = reason,
         })
     end
@@ -127,8 +123,12 @@ function PickupController:Start(context)
             end
             if type(message.generation) ~= "number" or message.generation < runtime.Generation
                 or runtime.RefreshBlocked then return end
+            if type(message.operation) ~= "number" or message.operation < 0
+                or message.operation ~= math.floor(message.operation) then return end
+            if runtime.CarryRootId then return end
             runtime.Generation = message.generation
             runtime.TargetElementId = message.elementId
+            runtime.TargetOperation = message.operation
             runtime.AwaitingResult = false
             ResetProgress()
             UI:SetProgressMaxValue({ config.PickupProgressId }, 100)
@@ -160,14 +160,53 @@ function PickupController:Start(context)
             if not rootId or runtime.Holding or runtime.AwaitingResult then return end
             runtime.Holding = true
             runtime.HoldStartTime = TimerManager:GetTimeSeconds()
-            runtime.ProgressIndex = 0
             UI:SetProgressCurrentValue({ config.PickupProgressId }, 0)
             System:SendToServer(context.NetMsg.Messages.PickupBegin, {
                 elementId = rootId,
                 generation = runtime.Generation,
+                operation = runtime.TargetOperation,
             })
             Log:PrintLog("[PickupController] 开始按住正式拾取",
                 "elementId:", rootId)
+        end)
+    end
+
+    local function RenderCarry()
+        if context.Services.PickupController ~= runtime or not runtime.CarryReady then return end
+        UI:OnShow({ config.CarryUiGroupId }, runtime.CarryRootId ~= nil
+            and not runtime.RefreshBlocked and not runtime.DropPending)
+    end
+
+    runtime.CarryStateCallback = function(_, message)
+        Run("处理偷鸡携带快照", function()
+            if type(message) ~= "table" or type(message.version) ~= "number"
+                or message.version <= runtime.CarryVersion or message.version ~= math.floor(message.version)
+                or type(message.generation) ~= "number" or message.generation < runtime.Generation
+                or type(message.carrying) ~= "boolean" then return end
+            if message.carrying and (not IsPositiveInteger(message.elementId)
+                or not IsPositiveInteger(message.operation)) then return end
+            if message.generation > runtime.Generation then HideInteraction() end
+            runtime.Generation = message.generation
+            runtime.CarryVersion = message.version
+            runtime.CarryRootId = message.carrying and message.elementId or nil
+            runtime.CarryOperation = message.carrying and message.operation or nil
+            runtime.DropPending = false
+            if runtime.CarryRootId then HideInteraction() end
+            RenderCarry()
+        end)
+    end
+
+    runtime.DropCallback = function()
+        Run("主动放下按钮", function()
+            if not runtime.CarryReady or not runtime.CarryRootId
+                or runtime.RefreshBlocked or runtime.DropPending then return end
+            runtime.DropPending = true
+            RenderCarry()
+            System:SendToServer(context.NetMsg.Messages.TheftManualDrop, {
+                elementId = runtime.CarryRootId,
+                operation = runtime.CarryOperation,
+                generation = runtime.Generation,
+            })
         end)
     end
 
@@ -183,11 +222,18 @@ function PickupController:Start(context)
     end
 
     context.Events:Subscribe(PickupController.Name, "RefreshPhaseChanged", function(snapshot)
+        if context.Services.PickupController ~= runtime then return end
         if snapshot.generation < runtime.Generation then return end
         local changed = snapshot.generation > runtime.Generation
         runtime.Generation = snapshot.generation
         runtime.RefreshBlocked = snapshot.phase == "Countdown" or snapshot.phase == "Clearing"
         if changed or runtime.RefreshBlocked then HideInteraction() end
+        if changed or runtime.RefreshBlocked then
+            runtime.CarryRootId = nil
+            runtime.CarryOperation = nil
+            runtime.DropPending = false
+        end
+        RenderCarry()
     end)
 
     UI:SetProgressMaxValue({ config.PickupProgressId }, 100)
@@ -195,13 +241,23 @@ function PickupController:Start(context)
     UI:OnShow({ config.PickupUiGroupId }, false)
     System:BindNotify(context.NetMsg.Messages.PickupShow, runtime.ShowCallback)
     System:BindNotify(context.NetMsg.Messages.PickupResult, runtime.ResultCallback)
+    System:BindNotify(context.NetMsg.Messages.TheftCarryState, runtime.CarryStateCallback)
     UI:RegisterPressed(config.PickupButtonId, runtime.PressedCallback)
     UI:RegisterReleased(config.PickupButtonId, runtime.ReleasedCallback)
+    context.Timers:AddTimer(PickupController.Name, GameConfig.Runtime.ServerReadyDelaySeconds, function()
+        if context.Services.PickupController ~= runtime then return end
+        runtime.CarryReady = true
+        UI:RegisterClicked(config.ManualDropButtonId, runtime.DropCallback)
+        runtime.DropRegistered = true
+        RenderCarry()
+        System:SendToServer(context.NetMsg.Messages.TheftCarrySnapshotRequest, {})
+    end)
 
     runtime.CheckTimerId = context.Timers:AddLoopTimer(
         PickupController.Name,
-        config.ProgressTickSeconds,
+        config.DistanceCheckSeconds,
         function()
+            if context.Services.PickupController ~= runtime then return end
             local rootId = runtime.TargetElementId
             if not rootId or runtime.AwaitingResult then return end
 
@@ -221,22 +277,19 @@ function PickupController:Start(context)
                     "maxHorizontalDistance:", config.MaxHorizontalDistance)
                 return
             end
+        end
+    )
 
-            if not runtime.Holding then return end
+    runtime.ProgressTimerId = context.Timers:AddLoopTimer(
+        PickupController.Name,
+        config.ProgressTickSeconds,
+        function()
+            if context.Services.PickupController ~= runtime or not runtime.Holding then return end
+            local rootId = runtime.TargetElementId
+            if not rootId or runtime.AwaitingResult then return end
             local elapsedSeconds = TimerManager:GetTimeSeconds() - runtime.HoldStartTime
-            local progressIndex = math.floor(elapsedSeconds / config.ProgressTickSeconds)
-            if elapsedSeconds >= config.HoldSeconds then
-                progressIndex = #config.ProgressValues
-            else
-                progressIndex = math.min(#config.ProgressValues, progressIndex)
-            end
-            if progressIndex > runtime.ProgressIndex then
-                runtime.ProgressIndex = progressIndex
-                local progress = config.ProgressValues[progressIndex]
-                if progress then
-                    UI:SetProgressCurrentValue({ config.PickupProgressId }, progress)
-                end
-            end
+            local progress = math.max(0, math.min(100, elapsedSeconds / config.HoldSeconds * 100))
+            UI:SetProgressCurrentValue({ config.PickupProgressId }, progress)
 
             if elapsedSeconds >= config.HoldSeconds then
                 runtime.Holding = false
@@ -245,6 +298,7 @@ function PickupController:Start(context)
                 System:SendToServer(context.NetMsg.Messages.PickupComplete, {
                     elementId = rootId,
                     generation = runtime.Generation,
+                    operation = runtime.TargetOperation,
                 })
                 Log:PrintLog("[PickupController] 按住时间已满，发送正式完成请求",
                     "elementId:", rootId,
@@ -263,7 +317,12 @@ function PickupController:Stop(context)
     if context.Side ~= "Client" then return end
     local runtime = context.Services.PickupController
     if not runtime then return end
+    context.Services.PickupController = nil
+    runtime.Holding = false
+    runtime.HoldStartTime = nil
+    runtime.CarryReady = false
     if runtime.CheckTimerId then context.Timers:Remove(runtime.CheckTimerId) end
+    if runtime.ProgressTimerId then context.Timers:Remove(runtime.ProgressTimerId) end
     if runtime.PressedCallback then
         UI:UnRegisterPressed(GameConfig.Theft.PickupButtonId, runtime.PressedCallback)
     end
@@ -276,9 +335,15 @@ function PickupController:Stop(context)
     if runtime.ResultCallback then
         System:UnbindNotify(context.NetMsg.Messages.PickupResult, runtime.ResultCallback)
     end
+    if runtime.CarryStateCallback then
+        System:UnbindNotify(context.NetMsg.Messages.TheftCarryState, runtime.CarryStateCallback)
+    end
+    if runtime.DropRegistered then
+        UI:UnRegisterClicked(GameConfig.Theft.ManualDropButtonId, runtime.DropCallback)
+    end
     UI:SetProgressCurrentValue({ GameConfig.Theft.PickupProgressId }, 0)
     UI:OnShow({ GameConfig.Theft.PickupUiGroupId }, false)
-    context.Services.PickupController = nil
+    UI:OnShow({ GameConfig.Theft.CarryUiGroupId }, false)
 end
 
 return PickupController

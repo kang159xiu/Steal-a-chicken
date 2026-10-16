@@ -17,6 +17,16 @@ local AvatarPictureBoardTest = require "Common.Debug.AvatarPictureBoardTest"
 local AvatarReadTest = require "Common.Debug.AvatarReadTest"
 local PickupController = require "Client.Controllers.PickupController"
 local HotbarController = require "Client.Controllers.HotbarController"
+local SellShopController = require "Client.Controllers.SellShopController"
+local PlacementController = require "Client.Controllers.PlacementController"
+local HomeNameController = require "Client.Controllers.HomeNameController"
+local HomeCountController = require "Client.Controllers.HomeCountController"
+local HomeUpgradeController = require "Client.Controllers.HomeUpgradeController"
+local TreadmillController = require "Client.Controllers.TreadmillController"
+local RebirthController = require "Client.Controllers.RebirthController"
+local EggGrowthController = require "Client.Controllers.EggGrowthController"
+local EggCollectionController = require "Client.Controllers.EggCollectionController"
+local EggCollectionListController = require "Client.Controllers.EggCollectionListController"
 local HotbarClickTest = require "Common.Debug.HotbarClickTest"
 
 local GameClient = {
@@ -59,6 +69,16 @@ function GameClient:Init()
     self.Context.Manager:Register(AvatarReadTest)
     self.Context.Manager:Register(PickupController)
     self.Context.Manager:Register(HotbarController)
+    self.Context.Manager:Register(SellShopController)
+    self.Context.Manager:Register(PlacementController)
+    self.Context.Manager:Register(HomeNameController)
+    self.Context.Manager:Register(HomeCountController)
+    self.Context.Manager:Register(HomeUpgradeController)
+    self.Context.Manager:Register(TreadmillController)
+    self.Context.Manager:Register(RebirthController)
+    self.Context.Manager:Register(EggGrowthController)
+    self.Context.Manager:Register(EggCollectionController)
+    self.Context.Manager:Register(EggCollectionListController)
     if GameConfig.Refresh.Enabled then self.Context.Manager:Register(RefreshController) end
     self.Context.Manager:Register(HotbarClickTest)
 

@@ -145,6 +145,7 @@ function TheftService:Start(context)
         Generation = 0,
         Refreshing = false,
         Generating = false,
+        CarryVersion = 0,
         ChickensByRoot = {},
         TouchedByPlayer = {},
         HoldByPlayer = {},
@@ -166,6 +167,22 @@ function TheftService:Start(context)
             generation = runtime.Generation,
             success = success == true,
             reason = reason,
+        })
+    end
+
+    local function SendCarryState(playerId)
+        local rootId = runtime.CarriedByPlayer[playerId]
+        local chicken = rootId and runtime.ChickensByRoot[rootId]
+        local carrying = not runtime.Stopped and not runtime.Refreshing
+            and chicken ~= nil and chicken.state == "Carried" and chicken.playerId == playerId
+            and zone:IsInStolenArea(playerId)
+        runtime.CarryVersion = runtime.CarryVersion + 1
+        System:SendToClient(playerId, context.NetMsg.Messages.TheftCarryState, {
+            version = runtime.CarryVersion,
+            generation = runtime.Generation,
+            carrying = carrying == true,
+            elementId = carrying and rootId or nil,
+            operation = carrying and chicken.operation or 0,
         })
     end
 
@@ -290,18 +307,23 @@ function TheftService:Start(context)
             return false
         end
         local dropPosition = Element:GetPosition(rootId)
+        local previousOperation = chicken.operation
         chicken.operation = chicken.operation + 1
         chicken.state = "Dropped"
         chicken.playerId = nil
         runtime.CarriedByPlayer[playerId] = nil
         runtime.PendingByPlayer[playerId] = nil
         ClearPlayerInteraction(playerId)
+        SendCarryState(playerId)
         pcall(function() Element:UnBinding(rootId) end)
         context.Events:Publish("StolenChickenDropped", {
             playerId = playerId,
             chickenRootId = rootId,
             regionId = chicken.regionId,
             reason = reason,
+            previousOperation = previousOperation,
+            operation = chicken.operation,
+            generation = runtime.Generation,
         })
         if dropPosition then
             context.Timers:AddFrame(TheftService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
@@ -313,6 +335,66 @@ function TheftService:Start(context)
         Log:PrintServerLog("[TheftService] 携带鸡已原地掉落",
             "playerId:", playerId, "rootId:", rootId, "reason:", reason)
         return true
+    end
+
+    runtime.ManualDropCallback = function(_, message, playerId)
+        if not IsPositiveInteger(playerId) or type(message) ~= "table" then return end
+        local rootId = runtime.CarriedByPlayer[playerId]
+        local chicken = rootId and runtime.ChickensByRoot[rootId]
+        if runtime.Refreshing or not zone:IsInStolenArea(playerId) or not chicken
+            or chicken.state ~= "Carried" or chicken.playerId ~= playerId
+            or message.elementId ~= rootId or message.generation ~= runtime.Generation
+            or message.operation ~= chicken.operation then
+            SendCarryState(playerId)
+            return
+        end
+        -- 请求仅携带身份；落点取服务端此刻的玩家世界位置，不使用客户端坐标。
+        local position = Character:GetPosition(playerId)
+        if not position then error("主动放下无法读取玩家世界位置") end
+        local dropPosition = CopyPosition(position)
+        local previousOperation = chicken.operation
+        chicken.operation = chicken.operation + 1
+        local operation, generation = chicken.operation, runtime.Generation
+        chicken.state = "Dropping"
+        chicken.playerId = nil
+        runtime.CarriedByPlayer[playerId] = nil
+        ClearPlayerInteraction(playerId)
+        SendCarryState(playerId)
+        Element:UnBinding(rootId)
+        context.Events:Publish("StolenChickenDropped", {
+            playerId = playerId, chickenRootId = rootId, regionId = chicken.regionId,
+            reason = "manual", previousOperation = previousOperation,
+            operation = operation, generation = generation,
+        })
+        local function IsCurrent()
+            return not runtime.Stopped and context.Services.TheftService == runtime
+                and runtime.Generation == generation and runtime.ChickensByRoot[rootId] == chicken
+                and chicken.operation == operation and chicken.state == "Dropping"
+        end
+        context.Timers:AddFrame(TheftService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+            if not IsCurrent() then return end
+            Element:SetPosition(rootId, dropPosition, Element.COORDINATE.World)
+            context.Timers:AddFrame(TheftService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+                if not IsCurrent() then return end
+                local actualPosition = Element:GetPosition(rootId)
+                if not actualPosition then error("主动放下后无法读取鸡落地位置") end
+                if IsPositiveInteger(Element:GetAttachParentCharacter(rootId)) then
+                    error("主动放下后鸡仍附加在角色上")
+                end
+                chicken.manualRepickup = true
+                chicken.state = "Available"
+                Log:PrintServerLog("[TheftService] 主动放下已落地，可再次拾取",
+                    "rootId:", rootId, "operation:", operation,
+                    "requestedPosition:", tostring(dropPosition), "actualPosition:", tostring(actualPosition))
+            end)
+        end)
+    end
+
+    runtime.CarrySnapshotCallback = function(_, message, playerId)
+        if not IsPositiveInteger(playerId) then return end
+        for _, onlineId in ipairs(Character:GetAllPlayerIds() or {}) do
+            if onlineId == playerId then SendCarryState(playerId) return end
+        end
     end
 
     local function ClearOwnedDisplay(playerId, reason)
@@ -346,11 +428,14 @@ function TheftService:Start(context)
         chicken.state = "Owned"
         runtime.CarriedByPlayer[playerId] = nil
         chicken.playerId = nil
+        SendCarryState(playerId)
         context.Events:Publish("StolenChickenOwned", {
             playerId = playerId,
             chickenRootId = rootId,
             regionId = chicken.regionId,
             itemId = item.itemId,
+            operation = chicken.operation,
+            generation = runtime.Generation,
         })
         if hotbar then
             local adopted, adoptReason = hotbar:AdoptExistingDisplay(playerId, item.itemId, rootId)
@@ -388,6 +473,7 @@ function TheftService:Start(context)
         System:SendToClient(playerId, context.NetMsg.Messages.PickupShow, {
             elementId = elementId,
             generation = runtime.Generation,
+            operation = chicken.operation,
         })
     end
 
@@ -402,7 +488,7 @@ function TheftService:Start(context)
         if message.generation ~= runtime.Generation then return end
         local chicken = runtime.ChickensByRoot[rootId]
         if runtime.TouchedByPlayer[playerId] ~= rootId or not chicken
-            or chicken.state ~= "Available" then
+            or chicken.state ~= "Available" or message.operation ~= chicken.operation then
             Reject(playerId, rootId, "target_not_available")
             return
         end
@@ -418,6 +504,7 @@ function TheftService:Start(context)
         if not valid then Reject(playerId, rootId, reason) return end
         runtime.HoldByPlayer[playerId] = {
             rootId = rootId,
+            operation = chicken.operation,
             startedAtMs = MiscService:GetServerTimestamp(),
         }
     end
@@ -435,9 +522,13 @@ function TheftService:Start(context)
         local rootId = message.elementId
         if message.generation ~= runtime.Generation then return end
         local hold = runtime.HoldByPlayer[playerId]
-        if hold and hold.rootId == rootId then runtime.HoldByPlayer[playerId] = nil end
+        if hold and hold.rootId == rootId and message.operation == hold.operation then
+            runtime.HoldByPlayer[playerId] = nil
+        end
         if message.reason == "horizontal_distance_exceeded"
             and runtime.TouchedByPlayer[playerId] == rootId then
+            local chicken = runtime.ChickensByRoot[rootId]
+            if not chicken or chicken.operation ~= message.operation then return end
             runtime.TouchedByPlayer[playerId] = nil
         end
     end
@@ -453,6 +544,8 @@ function TheftService:Start(context)
         if message.generation ~= runtime.Generation then return end
         local hold = runtime.HoldByPlayer[playerId]
         local chicken = runtime.ChickensByRoot[rootId]
+        if not chicken or message.operation ~= chicken.operation
+            or (hold and hold.operation ~= chicken.operation) then return end
         if not hold or hold.rootId ~= rootId then Reject(playerId, rootId, "hold_not_started") return end
         local elapsedMs = MiscService:GetServerTimestamp() - hold.startedAtMs
         if elapsedMs < config.HoldSeconds * 1000 then
@@ -470,7 +563,8 @@ function TheftService:Start(context)
             Reject(playerId, rootId, "player_already_carrying")
             return
         end
-        local valid, playerPosition, _, distance, distanceReason = ValidateDistance(playerId, rootId)
+        if not zone:IsInStolenArea(playerId) then Reject(playerId, rootId, "not_in_stolen_area") return end
+        local valid, playerPosition, chickenPosition, distance, distanceReason = ValidateDistance(playerId, rootId)
         if not valid then
             ClearPlayerInteraction(playerId)
             Reject(playerId, rootId, distanceReason)
@@ -489,6 +583,9 @@ function TheftService:Start(context)
         chicken.playerId = playerId
         chicken.operation = chicken.operation + 1
         local operation = chicken.operation
+        local generation = runtime.Generation
+        local pickupPosition = CopyPosition(chickenPosition)
+        local manualRepickup = chicken.manualRepickup == true
         runtime.PendingByPlayer[playerId] = rootId
         Element:SetPosition(rootId, Engine.Vector(
             playerPosition.X,
@@ -511,12 +608,18 @@ function TheftService:Start(context)
                 runtime.PendingByPlayer[playerId] = nil
                 runtime.CarriedByPlayer[playerId] = rootId
                 chicken.state = "Carried"
+                chicken.manualRepickup = false
                 SendResult(playerId, rootId, true, "carried")
+                SendCarryState(playerId)
                 context.Events:Publish("ChickenCarried", {
                     playerId = playerId,
                     chickenRootId = rootId,
                     regionId = chicken.regionId,
                     spawnPosition = CopyPosition(chicken.spawnPosition),
+                    manualRepickup = manualRepickup,
+                    pickupPosition = pickupPosition,
+                    operation = operation,
+                    generation = generation,
                 })
                 Log:PrintServerLog("[TheftService] 玩家成功拿取鸡",
                     "playerId:", playerId,
@@ -544,6 +647,7 @@ function TheftService:Start(context)
 
     local function ProtectCallback(actionName, callback)
         return function(...)
+            if runtime.Stopped or context.Services.TheftService ~= runtime then return end
             local args = { n = select("#", ...), ... }
             local unpackArgs = table.unpack or unpack
             local ok, errorMessage = xpcall(function()
@@ -564,6 +668,8 @@ function TheftService:Start(context)
     runtime.CancelCallback = ProtectCallback("取消拾取请求回调失败", runtime.CancelCallback)
     runtime.FatalDamageCallback = ProtectCallback("携鸡死亡回调失败", runtime.FatalDamageCallback)
     runtime.PreleaveCallback = ProtectCallback("携鸡离开回调失败", runtime.PreleaveCallback)
+    runtime.ManualDropCallback = ProtectCallback("主动放下回调失败", runtime.ManualDropCallback)
+    runtime.CarrySnapshotCallback = ProtectCallback("携带快照回调失败", runtime.CarrySnapshotCallback)
 
     context.Services.TheftService = runtime
     if config.InteractionEnabled then
@@ -578,10 +684,12 @@ function TheftService:Start(context)
         context.Events:Subscribe(TheftService.Name, "GuardianCaughtChicken", function(snapshot)
             local chicken = runtime.ChickensByRoot[snapshot.chickenRootId]
             if not chicken then return end
+            if snapshot.generation ~= runtime.Generation or snapshot.operation ~= chicken.operation then return end
             if chicken.playerId then
                 runtime.CarriedByPlayer[chicken.playerId] = nil
                 runtime.PendingByPlayer[chicken.playerId] = nil
                 ClearPlayerInteraction(chicken.playerId)
+                SendCarryState(chicken.playerId)
             end
             chicken.playerId = nil
             chicken.state = "Returning"
@@ -591,8 +699,11 @@ function TheftService:Start(context)
         context.Events:Subscribe(TheftService.Name, "GuardianChickenReturned", function(snapshot)
             local chicken = runtime.ChickensByRoot[snapshot.chickenRootId]
             if not chicken then return end
+            if snapshot.generation ~= runtime.Generation or snapshot.operation ~= chicken.operation
+                or chicken.state ~= "Returning" then return end
             chicken.playerId = nil
             chicken.state = "Available"
+            chicken.manualRepickup = false
             chicken.spawnPosition = CopyPosition(snapshot.spawnPosition)
             Log:PrintServerLog("[TheftService] 鸡已由守护者送回生成点",
                 "regionId:", chicken.regionId, "rootId:", chicken.rootId)
@@ -603,6 +714,8 @@ function TheftService:Start(context)
         System:BindNotify(context.NetMsg.Messages.PickupBegin, runtime.BeginCallback)
         System:BindNotify(context.NetMsg.Messages.PickupComplete, runtime.CompleteCallback)
         System:BindNotify(context.NetMsg.Messages.PickupCancel, runtime.CancelCallback)
+        System:BindNotify(context.NetMsg.Messages.TheftManualDrop, runtime.ManualDropCallback)
+        System:BindNotify(context.NetMsg.Messages.TheftCarrySnapshotRequest, runtime.CarrySnapshotCallback)
     else
         runtime.TouchCallback = nil
         runtime.BeginCallback = nil
@@ -610,6 +723,8 @@ function TheftService:Start(context)
         runtime.CancelCallback = nil
         runtime.FatalDamageCallback = nil
         runtime.PreleaveCallback = nil
+        runtime.ManualDropCallback = nil
+        runtime.CarrySnapshotCallback = nil
         Log:PrintServerLog("[TheftService] 4A-1 仅启用鸡生成，拾取交互未登记")
     end
 
@@ -625,6 +740,9 @@ function TheftService:Start(context)
         self.HoldByPlayer = {}
         self.CarriedByPlayer = {}
         self.PendingByPlayer = {}
+        if config.InteractionEnabled then
+            for _, playerId in ipairs(Character:GetAllPlayerIds() or {}) do SendCarryState(playerId) end
+        end
         local oldChickens = self.ChickensByRoot
         self.RefreshRoots = oldChickens
         self.ChickensByRoot = {}
@@ -709,6 +827,14 @@ function TheftService:Stop(context)
     local runtime = context.Services.TheftService
     if not runtime then return end
     runtime.Stopped = true
+    if GameConfig.Theft.InteractionEnabled then
+        for _, playerId in ipairs(Character:GetAllPlayerIds() or {}) do
+            runtime.CarryVersion = runtime.CarryVersion + 1
+            System:SendToClient(playerId, context.NetMsg.Messages.TheftCarryState, {
+                version = runtime.CarryVersion, generation = runtime.Generation, carrying = false, operation = 0,
+            })
+        end
+    end
     for rootId in pairs(runtime.RefreshRoots or {}) do
         pcall(function() Element:UnBinding(rootId) end)
         context.ElementCopy:DestroyTree(rootId)
@@ -731,6 +857,12 @@ function TheftService:Stop(context)
     end
     if runtime.CancelCallback then
         System:UnbindNotify(context.NetMsg.Messages.PickupCancel, runtime.CancelCallback)
+    end
+    if runtime.ManualDropCallback then
+        System:UnbindNotify(context.NetMsg.Messages.TheftManualDrop, runtime.ManualDropCallback)
+    end
+    if runtime.CarrySnapshotCallback then
+        System:UnbindNotify(context.NetMsg.Messages.TheftCarrySnapshotRequest, runtime.CarrySnapshotCallback)
     end
     for rootId in pairs(runtime.ChickensByRoot) do
         pcall(function() Element:UnBinding(rootId) end)

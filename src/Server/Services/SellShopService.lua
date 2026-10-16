@@ -1,0 +1,163 @@
+local GameConfig = require "Common.Config.GameConfig"
+local Decimal = require "Common.DecimalInteger"
+local SellShopService = { Name = "SellShopService", FeatureFlag = "SellShop", Dependencies = { "InventoryService", "EconomyService" } }
+local function Integer(value)
+    return type(value) == "number" and value >= 0 and value < math.huge and value == math.floor(value)
+end
+local function Price(item)
+    if not item or item.count ~= 1 then return nil end
+    local value
+    if item.kind == "Chicken" then
+        local config = GameConfig.ChickenTypes[item.typeId]
+        value = config and config.ChickenSellPrice
+    elseif item.kind == "Egg" then
+        value = item.finalSellPrice
+    end
+    if not Decimal.FromSafeInteger(value) then return nil end
+    return value
+end
+function SellShopService:ValidateConfig()
+    local c = GameConfig.SellShop
+    local errors = {}
+    for _, key in ipairs({ "EggListId", "ChickenListId", "TemplateId", "ImageId", "PriceTextId",
+        "AppearanceButtonId", "SelectedBorderId", "SellAllEggsButtonId", "SellAllChickensButtonId", "BalanceTextId" }) do
+        if not c or not Integer(c[key]) or c[key] == 0 then errors[#errors + 1] = "SellShop." .. key .. " 必须是正整数" end
+    end
+    for typeId, config in pairs(GameConfig.ChickenTypes) do
+        if config.Enabled and not Decimal.FromSafeInteger(config.ChickenSellPrice) then errors[#errors + 1] = typeId .. " 鸡售价无效" end
+    end
+    return #errors == 0, errors
+end
+function SellShopService:Start(context)
+    if context.Side ~= "Server" then return end
+    local inventory, economy = context.Services.InventoryService, context.Services.EconomyService
+    local messages = context.NetMsg.Messages
+    local runtime = { Active = true, States = {} }
+    context.Services.SellShopService = runtime
+    local function Active() return runtime.Active and context.Services.SellShopService == runtime end
+    local function Protect(callback)
+        return function(...)
+            if not Active() then return end
+            local args = { n = select("#", ...), ... }
+            local ok, err = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
+            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
+        end
+    end
+    local function State(playerId)
+        local generation = economy:GetSessionGeneration(playerId)
+        if not generation then return nil end
+        local state = runtime.States[playerId]
+        if not state or state.generation ~= generation then
+            state = { generation = generation, version = 0, lastRequestId = 0, busy = false }
+            runtime.States[playerId] = state
+        end
+        return state
+    end
+    local function Current(playerId, state)
+        return Active() and state and runtime.States[playerId] == state and economy:IsCurrent(playerId, state.generation)
+    end
+    local function SendState(playerId)
+        if not Active() then return end
+        local state = State(playerId)
+        if not Current(playerId, state) then return end
+        local chickens, eggs = {}, {}
+        for _, item in ipairs(inventory:GetSnapshot(playerId)) do
+            local price = Price(item)
+            if price ~= nil then
+                local row = { itemId = item.itemId, kind = item.kind, typeId = item.typeId,
+                    iconIndex = item.iconIndex, sequence = item.sequence, count = 1, sellPrice = price }
+                local list = item.kind == "Chicken" and chickens or eggs
+                list[#list + 1] = row
+            end
+        end
+        local function Sort(a, b) return a.sequence < b.sequence end
+        table.sort(chickens, Sort); table.sort(eggs, Sort)
+        state.version = state.version + 1
+        System:SendToClient(playerId, messages.SellShopState, { sessionGeneration = state.generation,
+            version = state.version, balance = economy:GetBalance(playerId), chickens = chickens, eggs = eggs })
+    end
+    runtime.SnapshotCallback = Protect(function(_, message, playerId)
+        if Integer(playerId) and playerId > 0 and type(message) == "table" then SendState(playerId) end
+    end)
+    runtime.ActionCallback = Protect(function(_, message, playerId)
+        if not Integer(playerId) or playerId == 0 or type(message) ~= "table"
+            or not Integer(message.sessionGeneration) or not Integer(message.requestId) or message.requestId == 0
+            or (message.action ~= "single" and message.action ~= "all_chickens" and message.action ~= "all_eggs")
+            or (message.action == "single" and (type(message.itemId) ~= "string" or message.itemId == "")) then return end
+        local state = State(playerId)
+        if not Current(playerId, state) then return end
+        local function Result(success, reason, results, total)
+            if not Current(playerId, state) then return end
+            System:SendToClient(playerId, messages.SellShopResult, { sessionGeneration = message.sessionGeneration,
+                requestId = message.requestId, action = message.action, itemId = message.itemId,
+                success = success, reason = reason, results = results or {}, total = total or "0",
+                balance = economy:GetBalance(playerId) })
+        end
+        if message.sessionGeneration ~= state.generation then Result(false, "stale_session"); return end
+        if message.requestId <= state.lastRequestId then Result(false, "stale_request"); return end
+        state.lastRequestId = message.requestId
+        if state.busy then Result(false, "sale_busy"); return end
+        -- 固定接收时的集合；新入库不加入，失败项不重试，成功项不回滚。
+        local batch = {}
+        if message.action == "single" then batch[1] = { itemId = message.itemId }
+        else
+            local kind = message.action == "all_chickens" and "Chicken" or "Egg"
+            for _, item in ipairs(inventory:GetSnapshot(playerId)) do
+                if item.kind == kind then batch[#batch + 1] = item end
+            end
+            table.sort(batch, function(a, b) return a.sequence < b.sequence end)
+        end
+        state.busy = true
+        local results, total, success = {}, "0", true
+        local ok, err = pcall(function()
+            for _, candidate in ipairs(batch) do
+                if not Current(playerId, state) then return end
+                local price
+                local called, sold, reason = pcall(function()
+                    local item = inventory:GetItem(playerId, candidate.itemId)
+                    price = Price(item)
+                    if not item then return false, "item_not_found" end
+                    if price == nil then return false, "invalid_item_price" end
+                    return economy:SettleSale(playerId, state.generation, inventory, item.itemId, price)
+                end)
+                if not called then
+                    Log:PrintError("[SellShopService] 单项出售异常，不重试", "playerId:", playerId,
+                        "requestId:", message.requestId, "itemId:", candidate.itemId, "error:", tostring(sold))
+                    sold, reason = false, "sale_exception"
+                end
+                results[#results + 1] = { itemId = candidate.itemId, success = sold, reason = reason, sellPrice = sold and price or nil }
+                if sold then total = Decimal.Add(total, Decimal.FromSafeInteger(price))
+                else
+                    success = false
+                    Log:PrintWarning("[SellShopService] 出售失败", "playerId:", playerId,
+                        "requestId:", message.requestId, "itemId:", candidate.itemId, "reason:", tostring(reason))
+                end
+            end
+        end)
+        state.busy = false
+        if not ok then
+            Log:PrintError("[SellShopService] 出售批次异常，不重试", "playerId:", playerId,
+                "requestId:", message.requestId, "error:", tostring(err))
+            Result(false, "sale_exception", results, total)
+        else Result(success, success and "sold" or "partial_failure", results, total) end
+        if Current(playerId, state) then SendState(playerId) end
+    end)
+    context.Events:Subscribe(self.Name, "InventoryChanged", function(snapshot) SendState(snapshot.playerId) end)
+    context.Events:Subscribe(self.Name, "EconomyChanged", function(snapshot) SendState(snapshot.playerId) end)
+    runtime.LeaveCallback = function(playerId) runtime.States[playerId] = nil end
+    System:RegisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback)
+    System:BindNotify(messages.SellShopSnapshotRequest, runtime.SnapshotCallback)
+    System:BindNotify(messages.SellShopAction, runtime.ActionCallback)
+end
+function SellShopService:Stop(context)
+    local runtime = context.Services.SellShopService
+    if not runtime then return end
+    runtime.Active = false
+    runtime.States = {}
+    System:UnbindNotify(context.NetMsg.Messages.SellShopSnapshotRequest, runtime.SnapshotCallback)
+    System:UnbindNotify(context.NetMsg.Messages.SellShopAction, runtime.ActionCallback)
+    System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback)
+    context.Events:UnsubscribeOwner(self.Name)
+    context.Services.SellShopService = nil
+end
+return SellShopService

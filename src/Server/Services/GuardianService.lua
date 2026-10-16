@@ -68,6 +68,11 @@ end
 function GuardianService:ValidateConfig(context)
     if context.Side ~= "Server" then return true end
     local errors = {}
+    local moveSeconds = GameConfig.Theft.GuardianManualMoveSeconds
+    if type(moveSeconds) ~= "number" or moveSeconds ~= moveSeconds
+        or moveSeconds <= 0 or moveSeconds == math.huge then
+        errors[#errors + 1] = "Theft.GuardianManualMoveSeconds必须是有限正数"
+    end
     if type(GameConfig.Regions) ~= "table" or #GameConfig.Regions ~= 20 then
         errors[#errors + 1] = "Regions 必须显式包含20个区域"
     end
@@ -110,22 +115,33 @@ function GuardianService:Start(context)
     runtime.Tracker:Start()
 
     local StartNext
-    local function RemoveCandidate(regionRuntime, rootId)
+    local function IsActive(regionRuntime, active)
+        return context.Services.GuardianService == runtime and not runtime.Resetting
+            and runtime.ResetGeneration == active.generation
+            and runtime.Regions[regionRuntime.Config.RegionId] == regionRuntime
+            and regionRuntime.Active == active
+    end
+    local function RemoveCandidate(regionRuntime, rootId, operation, generation)
         for index = #regionRuntime.Candidates, 1, -1 do
-            if regionRuntime.Candidates[index].rootId == rootId then
+            local candidate = regionRuntime.Candidates[index]
+            if candidate.rootId == rootId
+                and (operation == nil or candidate.operation == operation)
+                and (generation == nil or candidate.chickenGeneration == generation) then
                 table.remove(regionRuntime.Candidates, index)
             end
         end
     end
 
     local function FinishActive(regionRuntime, active, returnedTarget, result)
-        if regionRuntime.Active ~= active then return end
+        if not IsActive(regionRuntime, active) then return end
         regionRuntime.Active = nil
         if active.resolution == "caught" and returnedTarget then
             context.Events:Publish("GuardianChickenReturned", {
                 regionId = regionRuntime.Config.RegionId,
                 chickenRootId = active.rootId,
                 spawnPosition = CopyPosition(active.spawnPosition),
+                operation = active.operation + 1,
+                generation = active.chickenGeneration,
             })
         end
         Log:PrintServerLog("[GuardianService] 守护者目标已结束",
@@ -137,7 +153,8 @@ function GuardianService:Start(context)
     end
 
     local function BeginTracking(regionRuntime, active)
-        if regionRuntime.Active ~= active then return end
+        if not IsActive(regionRuntime, active)
+            or (active.state ~= "Delay" and active.state ~= "Approaching") then return end
         active.delayTimerId = nil
         active.state = "Tracking"
         local guardianConfig = regionRuntime.Config.Guardian
@@ -154,12 +171,15 @@ function GuardianService:Start(context)
             maxVelocity = guardianConfig.MaxSpeed,
             distanceKeep = guardianConfig.KeepDistance,
             onCaught = function(caughtResult)
-                if regionRuntime.Active ~= active or runtime.Resetting then return end
+                if not IsActive(regionRuntime, active) or active.state ~= "Tracking" then return end
+                active.state = "Caught"
                 active.resolution = "caught"
                 context.Events:Publish("GuardianCaughtChicken", {
                     regionId = regionRuntime.Config.RegionId,
                     chickenRootId = active.rootId,
                     playerId = active.playerId,
+                    operation = active.operation,
+                    generation = active.chickenGeneration,
                 })
                 if active.playerId then
                     local playerPosition = Character:GetPosition(active.playerId)
@@ -191,6 +211,27 @@ function GuardianService:Start(context)
         end
     end
 
+    local function ReturnGuardian(regionRuntime, active, reason)
+        if not IsActive(regionRuntime, active) then return end
+        if active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
+        active.delayTimerId = nil
+        active.state = "ManualReturning"
+        active.resolution = reason
+        active.playerId = nil
+        runtime.Tracker:CancelGuardian(regionRuntime.GuardianElementId, reason)
+        local started, failure = runtime.Tracker:MoveGuardian({
+            guardianElementId = regionRuntime.GuardianElementId,
+            position = regionRuntime.GuardianReturnPosition,
+            seconds = GameConfig.Theft.GuardianManualMoveSeconds,
+            reason = reason,
+            onArrived = function(result)
+                if not IsActive(regionRuntime, active) or active.state ~= "ManualReturning" then return end
+                FinishActive(regionRuntime, active, false, result)
+            end,
+        })
+        if not started then error("主动放下后守护者返程失败: " .. tostring(failure)) end
+    end
+
     StartNext = function(regionRuntime)
         if runtime.Resetting or context.Services.GuardianService ~= runtime then return end
         if regionRuntime.Active or #regionRuntime.Candidates == 0 then return end
@@ -203,6 +244,21 @@ function GuardianService:Start(context)
         end
         local active = table.remove(regionRuntime.Candidates, selectedIndex)
         regionRuntime.Active = active
+        if active.manualRepickup then
+            active.state = "Approaching"
+            local started, failure = runtime.Tracker:MoveGuardian({
+                guardianElementId = regionRuntime.GuardianElementId,
+                position = active.pickupPosition,
+                seconds = GameConfig.Theft.GuardianManualMoveSeconds,
+                reason = "manual_repickup_approach",
+                onArrived = function()
+                    if not IsActive(regionRuntime, active) or active.state ~= "Approaching" then return end
+                    BeginTracking(regionRuntime, active)
+                end,
+            })
+            if not started then error("守护者接近再拾取位置失败: " .. tostring(failure)) end
+            return
+        end
         active.state = "Delay"
         local now = MiscService:GetServerTimestamp()
         local delaySeconds = math.max(0, (active.readyAtMs - now) / 1000)
@@ -219,6 +275,7 @@ function GuardianService:Start(context)
     end
 
     context.Events:Subscribe(GuardianService.Name, "ChickenCarried", function(snapshot)
+        if context.Services.GuardianService ~= runtime then return end
         local regionRuntime = runtime.Regions[snapshot.regionId]
         if not runtime.Ready or runtime.Resetting or not regionRuntime then return end
         runtime.Sequence = runtime.Sequence + 1
@@ -226,6 +283,11 @@ function GuardianService:Start(context)
             rootId = snapshot.chickenRootId,
             playerId = snapshot.playerId,
             spawnPosition = CopyPosition(snapshot.spawnPosition),
+            manualRepickup = snapshot.manualRepickup == true,
+            pickupPosition = snapshot.pickupPosition and CopyPosition(snapshot.pickupPosition),
+            operation = snapshot.operation,
+            chickenGeneration = snapshot.generation,
+            generation = runtime.ResetGeneration,
             sequence = runtime.Sequence,
             readyAtMs = MiscService:GetServerTimestamp()
                 + regionRuntime.Config.Guardian.TrackDelaySeconds * 1000,
@@ -235,31 +297,62 @@ function GuardianService:Start(context)
     end)
 
     context.Events:Subscribe(GuardianService.Name, "StolenChickenDropped", function(snapshot)
+        if context.Services.GuardianService ~= runtime or runtime.Resetting then return end
         local regionRuntime = runtime.Regions[snapshot.regionId]
         if not regionRuntime then return end
-        if regionRuntime.Active and regionRuntime.Active.rootId == snapshot.chickenRootId then
+        if snapshot.reason == "manual" then
+            RemoveCandidate(regionRuntime, snapshot.chickenRootId, snapshot.previousOperation, snapshot.generation)
+            local active = regionRuntime.Active
+            if active and active.rootId == snapshot.chickenRootId
+                and active.operation == snapshot.previousOperation
+                and active.chickenGeneration == snapshot.generation then
+                ReturnGuardian(regionRuntime, active, "manual_drop")
+            end
+            return
+        end
+        if regionRuntime.Active and regionRuntime.Active.rootId == snapshot.chickenRootId
+            and regionRuntime.Active.operation == snapshot.previousOperation
+            and regionRuntime.Active.chickenGeneration == snapshot.generation then
             regionRuntime.Active.playerId = nil
+            regionRuntime.Active.operation = snapshot.operation
         end
         for _, candidate in ipairs(regionRuntime.Candidates) do
-            if candidate.rootId == snapshot.chickenRootId then candidate.playerId = nil end
+            if candidate.rootId == snapshot.chickenRootId and candidate.operation == snapshot.previousOperation
+                and candidate.chickenGeneration == snapshot.generation then
+                candidate.playerId = nil
+                candidate.operation = snapshot.operation
+            end
         end
     end)
 
     context.Events:Subscribe(GuardianService.Name, "StolenChickenOwned", function(snapshot)
+        if context.Services.GuardianService ~= runtime or runtime.Resetting then return end
         local regionRuntime = runtime.Regions[snapshot.regionId]
         if not regionRuntime then return end
-        RemoveCandidate(regionRuntime, snapshot.chickenRootId)
+        RemoveCandidate(regionRuntime, snapshot.chickenRootId, snapshot.operation, snapshot.generation)
         local active = regionRuntime.Active
-        if not active or active.rootId ~= snapshot.chickenRootId then return end
+        if not active or active.rootId ~= snapshot.chickenRootId or active.operation ~= snapshot.operation
+            or active.chickenGeneration ~= snapshot.generation then return end
         active.resolution = "owned"
         if active.state == "Delay" then
             if active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
             regionRuntime.Active = nil
             StartNext(regionRuntime)
-        elseif active.state == "Tracking" then
+        elseif active.state == "Tracking" or active.state == "Approaching" then
+            local fromApproach = active.state == "Approaching"
+            active.state = "ReturningOwned"
             local stopped, reason = runtime.Tracker:StopAndReturnGuardian(
                 regionRuntime.GuardianElementId,
-                "chicken_owned"
+                "chicken_owned",
+                fromApproach and {
+                    fromApproach = true,
+                    debugName = "再拾取接近阶段成功带回",
+                    triggerBoxId = regionRuntime.TriggerBoxId,
+                    targetElementId = active.rootId,
+                    guardianReturnPosition = regionRuntime.GuardianReturnPosition,
+                    targetReturnPosition = active.spawnPosition,
+                    onReturned = function(result) FinishActive(regionRuntime, active, false, result) end,
+                } or nil
             )
             if not stopped then
                 error("成功带回后守护者停止复位失败: " .. tostring(reason))
@@ -277,7 +370,7 @@ function GuardianService:Start(context)
             regionRuntime.Active = nil
             regionRuntime.Candidates = {}
             if active and active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
-            self.Tracker:StopTrackingOnly(regionRuntime.GuardianElementId, "refresh")
+            self.Tracker:CancelGuardian(regionRuntime.GuardianElementId, "refresh")
         end
         context.Timers:AddFrame(GuardianService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
             if context.Services.GuardianService ~= self or self.ResetGeneration ~= generation then return end
@@ -305,6 +398,7 @@ function GuardianService:Start(context)
     end
 
     context.Timers:AddTimer(GuardianService.Name, GameConfig.Runtime.ServerReadyDelaySeconds, function()
+        if context.Services.GuardianService ~= runtime then return end
         local enabledCount = 0
         for _, region in ipairs(GameConfig.Regions) do
             if region.Enabled then
@@ -343,6 +437,9 @@ function GuardianService:Stop(context)
     if context.Side ~= "Server" then return end
     local runtime = context.Services.GuardianService
     if not runtime then return end
+    context.Services.GuardianService = nil
+    runtime.ResetGeneration = runtime.ResetGeneration + 1
+    runtime.Resetting = true
     if runtime.Tracker then runtime.Tracker:Stop() end
     for _, regionRuntime in pairs(runtime.Regions) do
         local guardianId = regionRuntime.GuardianElementId
@@ -357,7 +454,6 @@ function GuardianService:Stop(context)
         end
     end
     runtime.Regions = {}
-    context.Services.GuardianService = nil
 end
 
 return GuardianService

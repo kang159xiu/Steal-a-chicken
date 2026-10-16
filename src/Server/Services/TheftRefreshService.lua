@@ -8,7 +8,7 @@ local TheftRefreshService = {
 function TheftRefreshService:ValidateConfig(context)
     local config = GameConfig.Refresh
     local errors = {}
-    for _, field in ipairs({ "IntervalSeconds", "CountdownSeconds", "DisplayElementId", "CountdownUiId" }) do
+    for _, field in ipairs({ "IntervalSeconds", "CountdownSeconds", "CountdownUiId" }) do
         local value = config[field]
         if type(value) ~= "number" or value ~= value or value <= 0 or value == math.huge then
             errors[#errors + 1] = "Refresh." .. field .. " 必须是有限正数"
@@ -65,19 +65,12 @@ function TheftRefreshService:Start(context)
         local cleared, reset, countdownEnded = false, false, false
         local function TryGenerate()
             if not IsCurrent(cycle) or not cleared or not reset or not countdownEnded then return end
-            -- 表现元件归位后再等待引擎落地，才解除拾取屏障并启动新批次。
             if runtime.Phase == "Generating" then return end
             runtime.Phase = "Generating"
-            context.Timers:AddFrame(TheftRefreshService.Name,
-                GameConfig.Runtime.EngineOperationDelayFrames, function()
-                    if not IsCurrent(cycle) then return end
-                    theft:GenerateRegions()
-                    if not theft.Ready then SetPhase("Generating") end
-                end)
+            theft:GenerateRegions()
+            if not theft.Ready then SetPhase("Generating") end
         end
         System:FireSignEvent(config.SignalName, Character:GetAllPlayerIds() or {})
-        Element:SetPosition(config.DisplayElementId, config.ActivePosition, Element.COORDINATE.World)
-        runtime.DisplayActive = true
         theft:BeginRefresh(Protect(function()
             if not IsCurrent(cycle) then return end
             local teleportedCount = 0
@@ -108,8 +101,6 @@ function TheftRefreshService:Start(context)
         end))
         context.Timers:AddTimer(TheftRefreshService.Name, config.CountdownSeconds, function()
             if not IsCurrent(cycle) then return end
-            Element:SetPosition(config.DisplayElementId, config.HiddenPosition, Element.COORDINATE.World)
-            runtime.DisplayActive = false
             countdownEnded = true
             SetPhase("Clearing")
             TryGenerate()
@@ -150,10 +141,6 @@ function TheftRefreshService:Stop(context)
     runtime.Cycle = runtime.Cycle + 1
     context.Services.TheftRefreshService = nil
     System:UnbindNotify(context.NetMsg.Messages.RefreshSnapshotRequest, runtime.RequestCallback)
-    if runtime.DisplayActive then
-        Element:SetPosition(GameConfig.Refresh.DisplayElementId,
-            GameConfig.Refresh.HiddenPosition, Element.COORDINATE.World)
-    end
 end
 
 return TheftRefreshService

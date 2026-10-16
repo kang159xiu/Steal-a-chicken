@@ -32,12 +32,20 @@ local FeatureFlags = {
     -- 仅用于避免共享开关在不需要该功能的端产生“未登记模块”警告。
     Scopes = {
         HotbarClickTest = { Server = false, Client = true },
+        Persistence = { Server = true, Client = false },
         Zone = { Server = true, Client = false },
-        Home = { Server = true, Client = false },
+        Home = { Server = true, Client = true },
         Inventory = { Server = true, Client = false },
         Guardian = { Server = true, Client = false },
         Theft = { Server = true, Client = true },
         Hotbar = { Server = true, Client = true },
+        Placement = { Server = true, Client = true },
+        EggProduction = { Server = true, Client = true },
+        EggCollection = { Server = true, Client = true },
+        SellShop = { Server = true, Client = true },
+        HomeUpgrade = { Server = true, Client = true },
+        Treadmill = { Server = true, Client = true },
+        Rebirth = { Server = true, Client = true },
     },
 
     Values = {
@@ -70,13 +78,13 @@ local FeatureFlags = {
         -- TheftService 的正式数据依赖，成功带回的鸡通过 InventoryService 入库。
         Inventory = true,
         Hotbar = true,
-        Placement = false,
-        EggProduction = false,
-        EggCollection = false,
-        SellShop = false,
-        HomeUpgrade = false,
-        Treadmill = false,
-        Rebirth = false,
+        Placement = true,
+        EggProduction = true,
+        EggCollection = true,
+        SellShop = true,
+        HomeUpgrade = true,
+        Treadmill = true,
+        Rebirth = true,
         Purchase = false,
     },
 }

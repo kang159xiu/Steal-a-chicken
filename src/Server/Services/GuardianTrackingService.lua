@@ -1,5 +1,5 @@
 -- 守护者追踪功能模板。
--- 只负责追踪、触发盒命中判定、停止追踪和返回位置；不处理候选队列、击飞或归属。
+-- 只负责追踪、触发盒命中判定、位置运动及取消；不处理候选队列、击飞或归属。
 local GuardianTrackingService = {}
 GuardianTrackingService.__index = GuardianTrackingService
 
@@ -75,10 +75,13 @@ function GuardianTrackingService.New(owner, timerRegistry, onError)
         _triggerCallback = nil,
         _sessionsByGuardian = {},
         _sessionsByTrigger = {},
+        _movesByGuardian = {},
     }, GuardianTrackingService)
 end
 
 function GuardianTrackingService:_CleanupSession(session)
+    if session.ResetTimerId then self._timers:Remove(session.ResetTimerId) end
+    if session.VerifyTimerId then self._timers:Remove(session.VerifyTimerId) end
     if self._sessionsByGuardian[session.GuardianElementId] == session then
         self._sessionsByGuardian[session.GuardianElementId] = nil
     end
@@ -155,6 +158,7 @@ function GuardianTrackingService:_HandleElementEnterTrigger(elementId, triggerBo
 
     local caughtSnapshot = BuildSnapshot(session, "target_entered_guardian_trigger")
     session.OnCaught(caughtSnapshot)
+    if self._stopped or self._sessionsByGuardian[session.GuardianElementId] ~= session then return end
     self:_ScheduleReturn(session, true, "target_entered_guardian_trigger")
 end
 
@@ -182,7 +186,8 @@ function GuardianTrackingService:TrackTarget(request)
         "GuardianTrackingService 必须先 Start，且不能在 Stop 后继续使用")
     ValidateTrackRequest(request)
 
-    if self._sessionsByGuardian[request.guardianElementId] then
+    if self._sessionsByGuardian[request.guardianElementId]
+        or self._movesByGuardian[request.guardianElementId] then
         return false, "guardian_busy"
     end
     if self._sessionsByTrigger[request.triggerBoxId] then
@@ -236,9 +241,9 @@ function GuardianTrackingService:StopTrackingOnly(guardianElementId, reason)
         return false, "guardian_not_tracking"
     end
 
-    Element:StopTracking(session.GuardianElementId)
     self:_CleanupSession(session)
     session.State = "Stopped"
+    Element:StopTracking(session.GuardianElementId)
     Log:PrintServerLog("[GuardianTrackingService] 停止追踪",
         session.DebugName,
         "guardianId:", session.GuardianElementId,
@@ -246,8 +251,80 @@ function GuardianTrackingService:StopTrackingOnly(guardianElementId, reason)
     return true
 end
 
-function GuardianTrackingService:StopAndReturnGuardian(guardianElementId, reason)
+-- MoveTo没有到达回调：持续指定秒数，停止运动后等待两帧再读取落点并通知队列。
+function GuardianTrackingService:MoveGuardian(request)
+    assert(self._started and not self._stopped, "守护者运动模块未运行")
+    assert(type(request) == "table" and type(request.guardianElementId) == "number",
+        "MoveGuardian缺少守护者ID")
+    assert(IsVector(request.position), "MoveGuardian缺少世界目标位置")
+    assert(type(request.seconds) == "number" and request.seconds > 0, "MoveGuardian需要正秒数")
+    assert(type(request.onArrived) == "function", "MoveGuardian缺少完成回调")
+    local guardianId = request.guardianElementId
+    if self._sessionsByGuardian[guardianId] or self._movesByGuardian[guardianId] then
+        return false, "guardian_busy"
+    end
+    self._sequence = self._sequence + 1
+    local move = { Sequence = self._sequence, Position = CopyVector(request.position) }
+    self._movesByGuardian[guardianId] = move
+    local function IsCurrent()
+        return not self._stopped and self._movesByGuardian[guardianId] == move
+    end
+    move.StartTimerId = self._timers:AddFrame(self._owner, 2, function()
+        move.StartTimerId = nil
+        if not IsCurrent() then return end
+        move.Moving = true
+        Element:MoveTo(guardianId, move.Position, request.seconds, Element.CURVE.linear)
+        move.EndTimerId = self._timers:AddTimer(self._owner, request.seconds, function()
+            move.EndTimerId = nil
+            if not IsCurrent() then return end
+            Element:StopMoveTo(guardianId)
+            move.Moving = false
+            move.VerifyTimerId = self._timers:AddFrame(self._owner, 2, function()
+                move.VerifyTimerId = nil
+                if not IsCurrent() then return end
+                local position = Element:GetPosition(guardianId)
+                if not position then error("守护者MoveTo后无法读取位置") end
+                self._movesByGuardian[guardianId] = nil
+                Log:PrintServerLog("[GuardianTrackingService] 守护者移动结束",
+                    "guardianId:", guardianId, "reason:", request.reason,
+                    "distanceFromDestination:", Distance(position, move.Position))
+                request.onArrived({ guardianPosition = position })
+            end)
+        end)
+    end)
+    return true
+end
+
+function GuardianTrackingService:CancelGuardian(guardianElementId, reason)
+    local move = self._movesByGuardian[guardianElementId]
+    if move then
+        self._movesByGuardian[guardianElementId] = nil
+        for _, field in ipairs({ "StartTimerId", "EndTimerId", "VerifyTimerId" }) do
+            if move[field] then self._timers:Remove(move[field]) end
+        end
+        if move.Moving then Element:StopMoveTo(guardianElementId) end
+    end
+    local stopped = self:StopTrackingOnly(guardianElementId, reason)
+    return move ~= nil or stopped
+end
+
+function GuardianTrackingService:StopAndReturnGuardian(guardianElementId, reason, moveReturn)
     local session = self._sessionsByGuardian[guardianElementId]
+    -- 接近阶段尚无追踪会话；成功带回仍复用原两帧复位、两帧验证链。
+    if not session and self._movesByGuardian[guardianElementId] and moveReturn then
+        assert(IsVector(moveReturn.guardianReturnPosition), "接近取消后缺少守护者返回位置")
+        self:CancelGuardian(guardianElementId, reason)
+        self._sequence = self._sequence + 1
+        session = {
+            Sequence = self._sequence, State = "Tracking",
+            DebugName = moveReturn.debugName, GuardianElementId = guardianElementId,
+            TriggerBoxId = moveReturn.triggerBoxId, TargetElementId = moveReturn.targetElementId,
+            GuardianReturnPosition = CopyVector(moveReturn.guardianReturnPosition),
+            TargetReturnPosition = CopyVector(moveReturn.targetReturnPosition),
+            OnReturned = moveReturn.onReturned,
+        }
+        self._sessionsByGuardian[guardianElementId] = session
+    end
     if not session then
         return false, "guardian_not_tracking"
     end
@@ -256,7 +333,7 @@ function GuardianTrackingService:StopAndReturnGuardian(guardianElementId, reason
     end
 
     self._sessionsByTrigger[session.TriggerBoxId] = nil
-    Element:StopTracking(session.GuardianElementId)
+    if not moveReturn or not moveReturn.fromApproach then Element:StopTracking(session.GuardianElementId) end
     self:_ScheduleReturn(session, false, reason)
     return true
 end
@@ -287,9 +364,10 @@ function GuardianTrackingService:Stop()
         self._triggerCallback = nil
     end
 
-    for guardianElementId in pairs(self._sessionsByGuardian) do
-        Element:StopTracking(guardianElementId)
-    end
+    local guardianIds = {}
+    for guardianId in pairs(self._sessionsByGuardian) do guardianIds[guardianId] = true end
+    for guardianId in pairs(self._movesByGuardian) do guardianIds[guardianId] = true end
+    for guardianId in pairs(guardianIds) do self:CancelGuardian(guardianId, "stop") end
     self._sessionsByGuardian = {}
     self._sessionsByTrigger = {}
 end

@@ -17,7 +17,17 @@ local AvatarPictureBoardTest = require "Common.Debug.AvatarPictureBoardTest"
 local AvatarReadTest = require "Common.Debug.AvatarReadTest"
 local ZoneService = require "Server.Services.ZoneService"
 local HomeService = require "Server.Services.HomeService"
+local HomeUpgradeService = require "Server.Services.HomeUpgradeService"
+local PlayerSpeedService = require "Server.Services.PlayerSpeedService"
+local TreadmillService = require "Server.Services.TreadmillService"
+local RebirthService = require "Server.Services.RebirthService"
+local PlacementService = require "Server.Services.PlacementService"
+local EggProductionService = require "Server.Services.EggProductionService"
+local EggCollectionService = require "Server.Services.EggCollectionService"
 local InventoryService = require "Server.Services.InventoryService"
+local PersistenceService = require "Server.Services.PersistenceService"
+local EconomyService = require "Server.Services.EconomyService"
+local SellShopService = require "Server.Services.SellShopService"
 local HotbarService = require "Server.Services.HotbarService"
 local GuardianService = require "Server.Services.GuardianService"
 local TheftService = require "Server.Services.TheftService"
@@ -63,7 +73,17 @@ function GameServer:Init()
     self.Context.Manager:Register(ZoneService)
     self.Context.Manager:Register(HomeService)
     self.Context.Manager:Register(InventoryService)
+    self.Context.Manager:Register(PersistenceService)
+    self.Context.Manager:Register(EconomyService)
+    self.Context.Manager:Register(PlayerSpeedService)
+    self.Context.Manager:Register(TreadmillService)
+    self.Context.Manager:Register(RebirthService)
+    self.Context.Manager:Register(HomeUpgradeService)
+    self.Context.Manager:Register(SellShopService)
     self.Context.Manager:Register(HotbarService)
+    self.Context.Manager:Register(PlacementService)
+    self.Context.Manager:Register(EggProductionService)
+    self.Context.Manager:Register(EggCollectionService)
     self.Context.Manager:Register(GuardianService)
     self.Context.Manager:Register(TheftService)
     if GameConfig.Refresh.Enabled then self.Context.Manager:Register(TheftRefreshService) end

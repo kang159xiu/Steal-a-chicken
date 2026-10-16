@@ -20,6 +20,11 @@ local function CopyItem(item)
         count = item.count,
         iconIndex = item.iconIndex,
         sequence = item.sequence,
+        sourceEggId = item.sourceEggId,
+        baseSellPrice = item.baseSellPrice,
+        finalScaleUnits = item.finalScaleUnits,
+        finalScale = item.finalScale,
+        finalSellPrice = item.finalSellPrice,
     }
 end
 
@@ -51,12 +56,16 @@ function InventoryService:Start(context)
         Players = {},
         GlobalSequence = 0,
         PreleaveCallback = nil,
+        SessionIds = {},
+        NextSession = 0,
+        Departed = {},
+        Restored = {},
     }
 
     local function EnsurePlayer(playerId)
         local data = runtime.Players[playerId]
         if not data then
-            data = { Chickens = {}, ChickenOrder = {}, Eggs = {} }
+            data = { Chickens = {}, ChickenOrder = {}, Eggs = {}, EggOrder = {} }
             runtime.Players[playerId] = data
         end
         return data
@@ -80,9 +89,9 @@ function InventoryService:Start(context)
             local item = data.Chickens[itemId]
             if item then result[#result + 1] = CopyItem(item) end
         end
-        for _, eggTypeId in ipairs(GameConfig.EggTypeOrder or {}) do
-            local item = data.Eggs[eggTypeId]
-            if item and item.count > 0 then result[#result + 1] = CopyItem(item) end
+        for _, itemId in ipairs(data.EggOrder) do
+            local item = data.Eggs[itemId]
+            if item then result[#result + 1] = CopyItem(item) end
         end
         return result
     end
@@ -92,10 +101,7 @@ function InventoryService:Start(context)
         if not data then return nil end
         local item = data.Chickens[itemId]
         if item then return CopyItem(item) end
-        for _, egg in pairs(data.Eggs) do
-            if egg.itemId == itemId then return CopyItem(egg) end
-        end
-        return nil
+        return CopyItem(data.Eggs[itemId])
     end
 
     function runtime:HasItem(playerId, itemId)
@@ -110,10 +116,104 @@ function InventoryService:Start(context)
         })
     end
 
+    function runtime:GetSessionGeneration(playerId)
+        if context.Services.InventoryService ~= self then return nil end
+        return self.SessionIds[playerId]
+    end
+    function runtime:CheckCapacity(playerId, kind, removeCount, addCount)
+        if (kind ~= "Chicken" and kind ~= "Egg") or type(removeCount) ~= "number" or type(addCount) ~= "number"
+            or removeCount < 0 or addCount < 0 or removeCount > 100 or addCount > 100
+            or removeCount ~= math.floor(removeCount) or addCount ~= math.floor(addCount) then
+            return false, "invalid_capacity_change"
+        end
+        local data = self.Players[playerId]
+        local count = data and #(kind == "Chicken" and data.ChickenOrder or data.EggOrder) or 0
+        if removeCount > count then return false, "invalid_capacity_change" end
+        local limit = kind == "Chicken" and GameConfig.InventoryCapacity.Chickens or GameConfig.InventoryCapacity.Eggs
+        if count - removeCount + addCount > limit then return false, "inventory_capacity_full" end
+        return true
+    end
+    -- 紧凑行：鸡七字段；蛋追加sourceEggId/baseSellPrice/finalScaleUnits/finalSellPrice。
+    -- finalScale由原整数档/100无损重建，避免编码浮点。
+    function runtime:ExportSnapshot(playerId, generation)
+        if generation == nil or self:GetSessionGeneration(playerId) ~= generation then return nil, "stale_inventory_session" end
+        local rows = {}
+        for _, item in ipairs(self:GetSnapshot(playerId)) do
+            local row = { item.itemId, item.kind, item.typeId, item.displayName, item.count, item.iconIndex, item.sequence }
+            if item.kind == "Egg" then
+                row[8], row[9], row[10], row[11] = item.sourceEggId, item.baseSellPrice, item.finalScaleUnits, item.finalSellPrice
+            end
+            rows[#rows + 1] = row
+        end
+        return { version = 1, sequenceHighWater = self.GlobalSequence, items = rows }
+    end
+    function runtime:RestoreSnapshot(playerId, generation, snapshot)
+        if generation == nil or self:GetSessionGeneration(playerId) ~= generation then return false, "stale_inventory_session" end
+        if self.Restored[playerId] == generation then return false, "inventory_already_restored" end
+        local function Dense(array)
+            if type(array) ~= "table" then return false end
+            local count = 0
+            for key in pairs(array) do
+                if type(key) ~= "number" or key < 1 or key > #array or key ~= math.floor(key) then return false end
+                count = count + 1
+            end
+            return count == #array
+        end
+        if type(snapshot) ~= "table" or snapshot.version ~= 1 or type(snapshot.items) ~= "table"
+            or not Dense(snapshot.items)
+            or type(snapshot.sequenceHighWater) ~= "number" or snapshot.sequenceHighWater < 0
+            or snapshot.sequenceHighWater > 9007199254740991 or snapshot.sequenceHighWater ~= math.floor(snapshot.sequenceHighWater) then
+            return false, "invalid_inventory_snapshot"
+        end
+        local prior = self.Players[playerId]
+        if prior and (#prior.ChickenOrder > 0 or #prior.EggOrder > 0) then return false, "inventory_not_empty" end
+        local data, ids, sequences = { Chickens = {}, ChickenOrder = {}, Eggs = {}, EggOrder = {} }, {}, {}
+        local function Safe(n, min)
+            return type(n) == "number" and n >= min and n <= 9007199254740991 and n == math.floor(n)
+        end
+        for _, row in ipairs(snapshot.items) do
+            if not Dense(row) or (row[2] ~= "Chicken" and row[2] ~= "Egg") or type(row[1]) ~= "string"
+                or type(row[3]) ~= "string" or type(row[4]) ~= "string" or row[5] ~= 1
+                or not Safe(row[6], 1) or not Safe(row[7], 1) or row[7] > snapshot.sequenceHighWater
+                or ids[row[1]] or sequences[row[7]] then return false, "invalid_inventory_snapshot" end
+            local prefix = row[2] == "Chicken" and "chicken" or "egg"
+            local owner, sequence = row[1]:match("^" .. prefix .. ":([1-9][0-9]*):([1-9][0-9]*)$")
+            if not owner or sequence ~= string.format("%.0f", row[7]) then return false, "invalid_item_identity" end
+            local item = { itemId = row[1], kind = row[2], typeId = row[3], displayName = row[4], count = 1, iconIndex = row[6], sequence = row[7] }
+            if item.kind == "Chicken" then
+                if #row ~= 7 or not GameConfig.ChickenTypes[item.typeId] then return false, "invalid_inventory_snapshot" end
+                data.Chickens[item.itemId] = item; data.ChickenOrder[#data.ChickenOrder + 1] = item.itemId
+            else
+                local _, _, egg = FindEggConfig(item.typeId)
+                if #row ~= 11 or not egg or not Safe(row[8], 1) or not Safe(row[9], 0) or not Safe(row[10], 1)
+                    or not Safe(row[11], 0) then return false, "invalid_inventory_snapshot" end
+                item.sourceEggId, item.baseSellPrice, item.finalScaleUnits, item.finalScale, item.finalSellPrice = row[8], row[9], row[10], row[10] / 100, row[11]
+                data.Eggs[item.itemId] = item; data.EggOrder[#data.EggOrder + 1] = item.itemId
+            end
+            ids[item.itemId], sequences[item.sequence] = true, true
+        end
+        if #data.ChickenOrder > 100 or #data.EggOrder > 100 then return false, "inventory_capacity_full" end
+        self.Players[playerId] = data
+        self.GlobalSequence = math.max(self.GlobalSequence, snapshot.sequenceHighWater)
+        self.Restored[playerId] = generation
+        local notified = false
+        return true, function()
+            if notified then return false, "already_notified" end
+            notified = true
+            if self:GetSessionGeneration(playerId) ~= generation then return false, "stale_inventory_session" end
+            PublishChanged(playerId, "restore_inventory")
+            return true
+        end -- 恢复协调方提交所有模块后再通知，避免半恢复快照。
+    end
+
     function runtime:AddChicken(playerId, chickenType)
         local config = GameConfig.ChickenTypes[chickenType]
         if not IsPositiveInteger(playerId) or not config or config.Enabled ~= true then
             return nil, "invalid_chicken_add"
+        end
+        if GameConfig.InventoryCapacity.Enabled then
+            local ok, reason = self:CheckCapacity(playerId, "Chicken", 0, 1)
+            if not ok then return nil, reason end
         end
         self.GlobalSequence = self.GlobalSequence + 1
         local itemId = "chicken:" .. tostring(playerId) .. ":" .. tostring(self.GlobalSequence)
@@ -133,37 +233,151 @@ function InventoryService:Start(context)
         return CopyItem(item)
     end
 
-    function runtime:AddEgg(playerId, eggTypeId, count)
-        if not IsPositiveInteger(playerId) or not IsPositiveInteger(count) then
+    -- 仅接收产蛋服务的权威记录；成熟、归属、幂等与场景移除由收取事务负责。
+    -- 保留场景身份与已结算价值，每枚生成独立库存身份，不按类型堆叠。
+    function runtime:AddEgg(playerId, eggRecord)
+        if context.Services.InventoryService ~= self then
+            return nil, "inventory_unavailable"
+        end
+        if not IsPositiveInteger(playerId) or type(eggRecord) ~= "table"
+            or not IsPositiveInteger(eggRecord.eggId) or eggRecord.eggId >= math.huge
+            or type(eggRecord.eggTypeId) ~= "string" or eggRecord.eggTypeId == "" then
             return nil, "invalid_egg_add"
         end
-        local _, chickenConfig, eggConfig = FindEggConfig(eggTypeId)
+        if type(eggRecord.baseSellPrice) ~= "number" or eggRecord.baseSellPrice < 0
+            or eggRecord.baseSellPrice >= math.huge
+            or eggRecord.baseSellPrice ~= math.floor(eggRecord.baseSellPrice)
+            or not IsPositiveInteger(eggRecord.finalScaleUnits)
+            or eggRecord.finalScaleUnits >= math.huge
+            or eggRecord.finalScale ~= eggRecord.finalScaleUnits / 100
+            or type(eggRecord.finalSellPrice) ~= "number" or eggRecord.finalSellPrice < 0
+            or eggRecord.finalSellPrice >= math.huge
+            or eggRecord.finalSellPrice ~= math.floor(eggRecord.finalSellPrice) then
+            return nil, "invalid_egg_value"
+        end
+        local _, chickenConfig, eggConfig = FindEggConfig(eggRecord.eggTypeId)
         if not chickenConfig or not eggConfig or eggConfig.Enabled ~= true then
             return nil, "egg_type_disabled_or_missing"
         end
-        local data = EnsurePlayer(playerId)
-        local item = data.Eggs[eggTypeId]
-        if not item then
-            self.GlobalSequence = self.GlobalSequence + 1
-            item = {
-                itemId = "egg:" .. eggTypeId,
-                kind = "Egg",
-                typeId = eggTypeId,
-                displayName = eggTypeId,
-                count = 0,
-                iconIndex = eggConfig.IconIndex,
-                sequence = self.GlobalSequence,
-            }
-            data.Eggs[eggTypeId] = item
+        if not IsPositiveInteger(eggConfig.IconIndex) then
+            return nil, "invalid_egg_icon_config"
         end
-        item.count = item.count + count
+        if GameConfig.InventoryCapacity.Enabled then
+            local ok, reason = self:CheckCapacity(playerId, "Egg", 0, 1)
+            if not ok then return nil, reason end
+        end
+        local data = EnsurePlayer(playerId)
+        self.GlobalSequence = self.GlobalSequence + 1
+        local itemId = "egg:" .. tostring(playerId) .. ":" .. tostring(self.GlobalSequence)
+        local item = {
+            itemId = itemId,
+            kind = "Egg",
+            typeId = eggRecord.eggTypeId,
+            displayName = eggRecord.eggTypeId,
+            count = 1,
+            iconIndex = eggConfig.IconIndex,
+            sequence = self.GlobalSequence,
+            sourceEggId = eggRecord.eggId,
+            baseSellPrice = eggRecord.baseSellPrice,
+            finalScaleUnits = eggRecord.finalScaleUnits,
+            finalScale = eggRecord.finalScale,
+            finalSellPrice = eggRecord.finalSellPrice,
+        }
+        data.Eggs[itemId] = item
+        data.EggOrder[#data.EggOrder + 1] = itemId
         PublishChanged(playerId, "add_egg")
         return CopyItem(item)
     end
 
-    function runtime:RemoveItem(playerId, itemId, reason)
+    -- 仅供服务端放置模块使用：归还记录必须来自其持有的原鸡，不接受客户端资产记录。
+    -- 放置仅传 removeItemId；收回仅传 returnedChicken；替换同时传两者。
+    -- 全部预检通过后无等待提交；不生成身份，也不改变 GlobalSequence。
+    function runtime:TransferChicken(playerId, removeItemId, returnedChicken, reason)
+        if context.Services.InventoryService ~= self or not IsPositiveInteger(playerId) then
+            return false, "player_inventory_unavailable"
+        end
+        local data = self.Players[playerId]
+        if not data then return false, "player_inventory_unavailable" end
+        if removeItemId == nil and returnedChicken == nil then
+            return false, "empty_chicken_transfer"
+        end
+        if reason ~= nil and (type(reason) ~= "string" or reason == "") then
+            return false, "invalid_transfer_reason"
+        end
+
+        local removedChicken, removeIndex
+        if removeItemId ~= nil then
+            if type(removeItemId) ~= "string" or removeItemId == "" then
+                return false, "invalid_remove_item_id"
+            end
+            removedChicken = data.Chickens[removeItemId]
+            if not removedChicken then return false, "chicken_not_found" end
+            if removedChicken.kind ~= "Chicken" then return false, "item_not_chicken" end
+            for index, itemId in ipairs(data.ChickenOrder) do
+                if itemId == removeItemId then removeIndex = index break end
+            end
+            if not removeIndex then return false, "chicken_order_missing" end
+        end
+
+        local returnedCopy
+        if returnedChicken ~= nil then
+            if type(returnedChicken) ~= "table" or returnedChicken.kind ~= "Chicken"
+                or type(returnedChicken.typeId) ~= "string"
+                or not GameConfig.ChickenTypes[returnedChicken.typeId]
+                or type(returnedChicken.displayName) ~= "string"
+                or returnedChicken.count ~= 1
+                or not IsPositiveInteger(returnedChicken.iconIndex)
+                or not IsPositiveInteger(returnedChicken.sequence)
+                or returnedChicken.sequence > self.GlobalSequence
+                or type(returnedChicken.itemId) ~= "string"
+                or not returnedChicken.itemId:match("^chicken:[1-9][0-9]*:" .. string.format("%.0f", returnedChicken.sequence) .. "$") then
+                return false, "invalid_returned_chicken"
+            end
+            if data.Chickens[returnedChicken.itemId] then
+                return false, "returned_chicken_already_in_inventory"
+            end
+            returnedCopy = CopyItem(returnedChicken)
+        end
+        if GameConfig.InventoryCapacity.Enabled then
+            local ok, reason = self:CheckCapacity(playerId, "Chicken", removedChicken and 1 or 0, returnedCopy and 1 or 0)
+            if not ok then return false, reason end
+        end
+
+        -- 从此处开始只操作已验证的 Lua 数据，不调用引擎或其他业务模块。
+        local removedCopy = CopyItem(removedChicken)
+        if removedChicken then
+            data.Chickens[removeItemId] = nil
+            table.remove(data.ChickenOrder, removeIndex)
+        end
+        if returnedCopy then
+            data.Chickens[returnedCopy.itemId] = returnedCopy
+            local insertIndex = #data.ChickenOrder + 1
+            for index, itemId in ipairs(data.ChickenOrder) do
+                if data.Chickens[itemId].sequence > returnedCopy.sequence then
+                    insertIndex = index
+                    break
+                end
+            end
+            table.insert(data.ChickenOrder, insertIndex, returnedCopy.itemId)
+        end
+        PublishChanged(playerId, reason or "transfer_chicken")
+        return true, removedCopy
+    end
+
+    -- 结算方可延后通知：无等待完成余额提交后必须调用返回的单次发布函数。
+    -- 默认调用保持原来的同步通知与返回值。
+    function runtime:RemoveItem(playerId, itemId, reason, deferChanged)
         local data = self.Players[playerId]
         if not data or type(itemId) ~= "string" then return false, "item_not_found" end
+        local function Changed(defaultReason)
+            if not deferChanged then PublishChanged(playerId, reason or defaultReason); return true end
+            local published = false
+            return true, function()
+                if published then return end
+                published = true
+                PublishChanged(playerId, reason or defaultReason)
+            end
+        end
         if data.Chickens[itemId] then
             data.Chickens[itemId] = nil
             for index = #data.ChickenOrder, 1, -1 do
@@ -172,20 +386,24 @@ function InventoryService:Start(context)
                     break
                 end
             end
-            PublishChanged(playerId, reason or "remove_chicken")
-            return true
+            return Changed("remove_chicken")
         end
-        for eggTypeId, item in pairs(data.Eggs) do
-            if item.itemId == itemId then
-                data.Eggs[eggTypeId] = nil
-                PublishChanged(playerId, reason or "remove_egg_stack")
-                return true
+        if data.Eggs[itemId] then
+            data.Eggs[itemId] = nil
+            for index = #data.EggOrder, 1, -1 do
+                if data.EggOrder[index] == itemId then
+                    table.remove(data.EggOrder, index)
+                    break
+                end
             end
+            return Changed("remove_egg")
         end
         return false, "item_not_found"
     end
 
     function runtime:ClearPlayer(playerId, reason)
+        self.SessionIds[playerId] = nil
+        self.Departed[playerId], self.Restored[playerId] = true, nil
         self.Players[playerId] = nil
         PublishChanged(playerId, reason or "clear_player")
     end
@@ -194,6 +412,22 @@ function InventoryService:Start(context)
         runtime:ClearPlayer(playerId, "player_preleave")
     end
     context.Services.InventoryService = runtime
+    runtime.EnterCallback = function(playerId)
+        if context.Services.InventoryService ~= runtime or not IsPositiveInteger(playerId) then return end
+        runtime.Departed[playerId] = nil
+        if not runtime.SessionIds[playerId] then
+            runtime.NextSession = runtime.NextSession + 1
+            runtime.SessionIds[playerId] = runtime.NextSession
+        end
+    end
+    System:RegisterEvent(Events.ON_PLAYER_ENTER, runtime.EnterCallback)
+    System:RegisterEvent(Events.ON_PLAYER_JOIN_MIDWAY, runtime.EnterCallback)
+    context.Timers:AddTimer(self.Name, GameConfig.Runtime.ServerReadyDelaySeconds, function()
+        if context.Services.InventoryService ~= runtime then return end
+        for _, id in ipairs(Character:GetAllPlayerIds() or {}) do
+            if not runtime.Departed[id] then runtime.EnterCallback(id) end
+        end
+    end)
     System:RegisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.PreleaveCallback)
     Log:PrintServerLog("[InventoryService] 正式库存模块已启动")
 end
@@ -206,6 +440,9 @@ function InventoryService:Stop(context)
         System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.PreleaveCallback)
     end
     runtime.Players = {}
+    runtime.SessionIds = {}
+    System:UnregisterEvent(Events.ON_PLAYER_ENTER, runtime.EnterCallback)
+    System:UnregisterEvent(Events.ON_PLAYER_JOIN_MIDWAY, runtime.EnterCallback)
     context.Services.InventoryService = nil
 end
 

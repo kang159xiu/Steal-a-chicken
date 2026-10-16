@@ -15,7 +15,7 @@ function RefreshController:Start(context)
             or snapshot.phase == "Generating")
         UI:OnShow({ config.CountdownUiId }, visible == true)
         if snapshot and snapshot.phase == "Generating" then
-            UI:SetText({ config.CountdownUiId }, "生成中", false)
+            UI:SetText({ config.CountdownUiId }, "刷新中", false)
         elseif visible then
             local seconds = math.max(0, math.ceil((snapshot.deadlineMs - MiscService:GetServerTimestamp()) / 1000))
             UI:SetText({ config.CountdownUiId }, tostring(seconds) .. "s", false)

@@ -87,19 +87,8 @@ function HotbarController:Start(context)
     local function SetItem(listViewId, itemId, itemData)
         if listViewId ~= config.TileViewId or type(itemData) ~= "table"
             or itemData.renderVersion ~= runtime.RenderVersion then return end
-        Log:PrintLog("[HotbarController] 进入瓦片装填回调",
-            "listViewId:", listViewId,
-            "listItemId:", tostring(itemId), "listItemIdType:", type(itemId),
-            "businessItemId:", tostring(type(itemData) == "table" and itemData.itemId),
-            "renderVersion:", runtime.RenderVersion)
         local imageUid = UI:GetListViewItemUID(listViewId, itemId, config.ItemImageId)
         local quantityUid = UI:GetListViewItemUID(listViewId, itemId, config.QuantityTextId)
-        Log:PrintLog("[HotbarController] 瓦片子控件查询结果",
-            "listViewId:", listViewId,
-            "listItemId:", tostring(itemId), "listItemIdType:", type(itemId),
-            "businessItemId:", tostring(type(itemData) == "table" and itemData.itemId),
-            "imageUid:", tostring(imageUid), "quantityUid:", tostring(quantityUid),
-            "renderVersion:", runtime.RenderVersion)
         if not imageUid or imageUid == "" or not quantityUid or quantityUid == "" then
             error("无法取得快捷栏瓦片子控件，itemId=" .. tostring(itemId))
         end
@@ -248,15 +237,6 @@ function HotbarController:Start(context)
                 if context.Services.HotbarController ~= runtime
                     or not runtime.ItemSelectionCallback then return end
                 Run("快捷栏瓦片点击", function()
-                    Log:PrintLog("[HotbarController] 收到原生瓦片选择变化",
-                        "listViewId:", tostring(listViewId),
-                        "listItemId:", tostring(itemId), "listItemIdType:", type(itemId),
-                        "itemDataType:", type(itemData),
-                        "businessItemId:", tostring(type(itemData) == "table" and itemData.itemId),
-                        "select:", tostring(select), "selectType:", type(select),
-                        "ready:", tostring(runtime.Ready), "visible:", tostring(runtime.Visible),
-                        "selectedItemId:", tostring(runtime.SelectedItemId),
-                        "renderVersion:", runtime.RenderVersion)
                     if select ~= true then return end
                     if listViewId ~= config.TileViewId or not runtime.Ready
                         or not runtime.Visible or runtime.Rendering then return end
@@ -264,23 +244,15 @@ function HotbarController:Start(context)
                         or itemData.renderVersion ~= runtime.RenderVersion
                         or type(itemData.itemId) ~= "string" or itemData.itemId == ""
                         or runtime.RenderedItems[itemId] ~= itemData.itemId then
-                        Log:PrintLog("[HotbarController] 忽略旧列表或无效瓦片点击",
-                            "listItemId:", tostring(itemId),
-                            "renderVersion:", runtime.RenderVersion)
                         return
                     end
                     local businessItemId = itemData.itemId
-                    -- 先复位输入状态；select=false 只记录，不发送第二次请求。
+                    -- 先复位输入状态；select=false 直接返回，不发送第二次请求。
                     UI:ClearListViewSelection(listViewId)
                     if not IsActive() then return end
                     System:SendToServer(context.NetMsg.Messages.HotbarToggleSelection, {
                         itemId = businessItemId,
                     })
-                    Log:PrintLog("[HotbarController] 快捷栏选择请求发送调用已返回",
-                        "messageId:", context.NetMsg.Messages.HotbarToggleSelection,
-                        "businessItemId:", businessItemId,
-                        "listItemId:", itemId,
-                        "renderVersion:", runtime.RenderVersion)
                 end)
             end
             UI:SetListViewItemSelectionChangeCall(config.TileViewId, runtime.ItemSelectionCallback)
