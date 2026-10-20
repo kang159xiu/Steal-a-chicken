@@ -1,4 +1,4 @@
--- 在线会话钱币唯一所有者；余额不落存档，离开后清理。
+-- 在线会话钱币唯一所有者；由存档协调方导出/恢复，离开前统一冻结快照。
 local GameConfig = require "Common.Config.GameConfig"
 local Decimal = require "Common.DecimalInteger"
 local EconomyService = { Name = "EconomyService", FeatureFlag = "SellShop", Dependencies = { "InventoryService" } }
@@ -13,6 +13,22 @@ function EconomyService:Start(context)
     local runtime = { Active = true, Sessions = {}, Departed = {}, Generation = 0 }
     context.Services.EconomyService = runtime
     local function Active() return runtime.Active and context.Services.EconomyService == runtime end
+    local function CanMutate(playerId)
+        if not GameConfig.Persistence.ProductionEnabled then return true end
+        local persistence = context.Services.PersistenceService
+        return persistence ~= nil and persistence:IsReady(playerId)
+    end
+    function runtime:BeginLoadSession(playerId)
+        self.Generation = self.Generation + 1
+        self.Departed[playerId] = nil
+        self.Sessions[playerId] = { generation = self.Generation, balance = "0" }
+        return self.Generation
+    end
+    function runtime:ClearPlayer(playerId)
+        local persistence = context.Services.PersistenceService
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(playerId) end
+        self.Departed[playerId], self.Sessions[playerId] = true, nil
+    end
     function runtime:GetSessionGeneration(playerId)
         if not Active() then return nil end
         local session = self.Sessions[playerId]
@@ -53,6 +69,7 @@ function EconomyService:Start(context)
     -- 金额由SellShop从权威物品读取；出售入账和升级扣款均由本模块修改余额。
     -- 扣库存和加钱之间没有事件、引擎调用或等待；发布通知时两者已提交。
     function runtime:SettleSale(playerId, generation, inventory, itemId, amount)
+        if not CanMutate(playerId) then return false, "persistence_not_ready" end
         if not self:IsCurrent(playerId, generation) or context.Services.InventoryService ~= inventory then
             return false, "session_unavailable"
         end
@@ -76,9 +93,29 @@ function EconomyService:Start(context)
         end
         return true
     end
+    -- 测试金额只取服务端配置；请求去重及操作锁由出售入口管理。
+    function runtime:AddTestMoney(playerId, generation)
+        if GameConfig.SellShop.TestMoneyEnabled ~= true then return false, "test_money_disabled" end
+        if not Active() or not self:IsCurrent(playerId, generation) then return false, "session_unavailable" end
+        if not CanMutate(playerId) then return false, "persistence_not_ready" end
+        local online = false
+        for _, id in ipairs(Character:GetAllPlayerIds() or {}) do if id == playerId then online = true; break end end
+        if not online then return false, "player_offline" end
+        local amount = GameConfig.SellShop.TestMoneyAmount
+        if not Decimal.IsValid(amount) or amount == "0" then return false, "invalid_test_amount" end
+        local session = self.Sessions[playerId]
+        session.balance = Decimal.Add(session.balance, amount)
+        -- 提交之后通知失败不回滚，也不把本次请求变成可重试的未提交操作。
+        local ok, err = pcall(function()
+            context.Events:Publish("EconomyChanged", { playerId = playerId, sessionGeneration = generation, balance = session.balance })
+        end)
+        if not ok then Log:PrintError("[EconomyService] 测试加钱后通知失败，不重试", "playerId:", playerId, "error:", tostring(err)) end
+        return true, amount
+    end
     -- 升级方在本调用成功后无等待提交等级，再调用返回的单次通知函数。
     -- 已提交扣款不因通知失败回滚；调用方不得因通知失败重新扣款。
     function runtime:TryDebit(playerId, generation, amount)
+        if not CanMutate(playerId) then return false, "persistence_not_ready" end
         if not Integer(playerId) or playerId == 0 or not Integer(generation) or generation == 0
             or not self:IsCurrent(playerId, generation) then return false, "session_unavailable" end
         if not Decimal.IsValid(amount) then return false, "invalid_debit_amount" end
@@ -112,11 +149,13 @@ function EconomyService:Start(context)
         context.Events:Publish("EconomyChanged", { playerId = playerId, sessionGeneration = runtime.Generation, balance = "0" })
     end
     runtime.EnterCallback = function(playerId) Join(playerId, false) end
-    runtime.ReconnectCallback = function(playerId) Join(playerId, true) end
+    runtime.ReconnectCallback = function(playerId)
+        runtime:ClearPlayer(playerId)
+        Join(playerId, true)
+    end
     runtime.LeaveCallback = function(playerId)
         if not Active() then return end
-        runtime.Departed[playerId] = true
-        runtime.Sessions[playerId] = nil
+        runtime:ClearPlayer(playerId)
     end
     System:RegisterEvent(Events.ON_PLAYER_ENTER, runtime.EnterCallback)
     System:RegisterEvent(Events.ON_PLAYER_JOIN_MIDWAY, runtime.EnterCallback)

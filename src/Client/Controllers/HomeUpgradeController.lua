@@ -60,13 +60,23 @@ function HomeUpgradeController:Start(context)
         runtime.DisplayTokens[homeId] = (runtime.DisplayTokens[homeId] or 0) + 1
         local token = runtime.DisplayTokens[homeId]
         context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, Protect(function()
-            if not runtime.Ready or runtime.Displays[homeId] ~= state or runtime.DisplayTokens[homeId] ~= token
-                or runtime.DisplayFailed[homeId] then return end
-            local ok, err = pcall(function() FuncElement:SetTextBoardText(state.elementId, "Lv." .. tostring(state.level)) end)
-            if not ok then
-                runtime.DisplayFailed[homeId] = true
-                Log:PrintError("[HomeUpgradeController] 等级文字失败，仅停本家园文字", "homeId:", homeId,
-                    "elementId:", state.elementId, "error:", tostring(err))
+            if not runtime.Ready or runtime.Displays[homeId] ~= state or runtime.DisplayTokens[homeId] ~= token then return end
+            if state.elementId and not runtime.DisplayFailed[homeId] then
+                local ok, err = pcall(function() FuncElement:SetTextBoardText(state.elementId, "Lv." .. tostring(state.level)) end)
+                if not ok then
+                    runtime.DisplayFailed[homeId] = true
+                    Log:PrintError("[HomeUpgradeController] 等级文字失败，仅停本家园文字", "homeId:", homeId,
+                        "elementId:", state.elementId, "error:", tostring(err))
+                end
+            end
+            local unlocked = {}
+            for _, slotIndex in ipairs(state.unlockedSlots) do unlocked[slotIndex] = true end
+            for _, slot in ipairs(state.slots) do
+                if runtime.Displays[homeId] ~= state or runtime.DisplayTokens[homeId] ~= token then return end
+                local color = unlocked[slot.slotIndex] and config.UnlockedSlotColor or config.LockedSlotColor
+                local ok, err = pcall(function() Element:SetColor(slot.elementId, config.SlotColorArea, color) end)
+                if not ok then Log:PrintError("[HomeUpgradeController] 放置位颜色失败，仅跳过该元件", "homeId:", homeId,
+                    "elementId:", slot.elementId, "error:", tostring(err)) end
             end
         end))
     end
@@ -98,12 +108,23 @@ function HomeUpgradeController:Start(context)
     runtime.StateCallback = Protect(function(_, message)
         if type(message) ~= "table" then return end
         if message.kind == "level" then
-            if not Integer(message.homeId) or not Integer(message.elementId) or not Integer(message.displayVersion)
-                or not Integer(message.level) or message.level > config.MaxLevel then return end
+            if not Integer(message.homeId) or (message.elementId ~= nil and not Integer(message.elementId)) or not Integer(message.displayVersion)
+                or not Integer(message.level) or message.level > config.MaxLevel or type(message.unlockedSlots) ~= "table"
+                or type(message.slots) ~= "table" then return end
+            local indices, elements = {}, {}
+            for _, slot in ipairs(message.slots) do
+                if type(slot) ~= "table" or not Integer(slot.slotIndex) or not Integer(slot.elementId) or indices[slot.slotIndex] or elements[slot.elementId] then return end
+                indices[slot.slotIndex], elements[slot.elementId] = true, true
+            end
+            local seen = {}
+            for _, slotIndex in ipairs(message.unlockedSlots) do
+                if not Integer(slotIndex) or not indices[slotIndex] or seen[slotIndex] then return end
+                seen[slotIndex] = true
+            end
             local previous = runtime.Displays[message.homeId]
             if previous and message.displayVersion <= previous.displayVersion then return end
             local state = { homeId = message.homeId, elementId = message.elementId, level = message.level,
-                displayVersion = message.displayVersion }
+                displayVersion = message.displayVersion, slots = message.slots, unlockedSlots = message.unlockedSlots }
             runtime.Displays[state.homeId] = state
             if runtime.Ready then QueueDisplay(state) end
             return
@@ -114,7 +135,9 @@ function HomeUpgradeController:Start(context)
             or message.targetVersion >= math.huge or message.targetVersion ~= math.floor(message.targetVersion)
             or not Integer(message.expectedLevel) or message.expectedLevel > config.MaxLevel
             or not Integer(message.chickenCapacity) or not Integer(message.eggCapacity)
-            or (message.visible and (not Integer(message.homeId) or not Integer(message.sessionGeneration) or not Integer(message.elementId)))
+            or (message.visible and (not Integer(message.homeId) or not Integer(message.sessionGeneration) or not Integer(message.elementId)
+                or (message.entry ~= "home" and message.entry ~= "placement")
+                or (message.entry == "placement" and not Integer(message.slotIndex))))
             or (message.expectedLevel < config.MaxLevel and (not Decimal.IsValid(message.upgradeCost)
                 or not Integer(message.nextChickenCapacity) or not Integer(message.nextEggCapacity))) then return end
         runtime.Version = message.version
@@ -131,6 +154,7 @@ function HomeUpgradeController:Start(context)
         local state = runtime.State
         if not request or not state or message.homeId ~= request.homeId or message.sessionGeneration ~= request.sessionGeneration
             or message.targetVersion ~= request.targetVersion or message.expectedLevel ~= request.expectedLevel
+            or message.entry ~= request.entry or message.slotIndex ~= request.slotIndex
             or state.homeId ~= request.homeId or state.sessionGeneration ~= request.sessionGeneration
             or type(message.success) ~= "boolean" then return end
         runtime.Pending[message.requestId] = nil
@@ -146,7 +170,8 @@ function HomeUpgradeController:Start(context)
         if state.busy or state.expectedLevel >= config.MaxLevel or next(runtime.Pending) ~= nil then return end
         runtime.RequestId = runtime.RequestId + 1
         local request = { requestId = runtime.RequestId, sessionGeneration = state.sessionGeneration,
-            homeId = state.homeId, targetVersion = state.targetVersion, expectedLevel = state.expectedLevel }
+            homeId = state.homeId, targetVersion = state.targetVersion, expectedLevel = state.expectedLevel,
+            entry = state.entry, slotIndex = state.slotIndex }
         runtime.Pending[request.requestId] = request
         System:SendToServer(messages.HomeUpgradeAction, request)
     end)

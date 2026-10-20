@@ -99,6 +99,8 @@ function ZoneService:Start(context)
     end
 
     runtime.PreleaveCallback = function(playerId)
+        local persistence = context.Services.PersistenceService
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(playerId) end
         runtime.InStolenAreaByPlayer[playerId] = nil
     end
 

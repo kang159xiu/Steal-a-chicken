@@ -13,6 +13,8 @@ local NetMsg = {
     },
 
     Messages = {
+        PersistenceState = 1000,
+        PersistenceSnapshotRequest = 1001,
         -- 临时家园分配测试：服务端同步头像目标，客户端启动后请求当前快照。
         HomeAssignmentTestAvatar = 1100,
         HomeAssignmentTestSnapshotRequest = 1101,
@@ -63,7 +65,10 @@ local NetMsg = {
         SellShopState = 1500,
         SellShopSnapshotRequest = 1501,
         SellShopAction = 1502,
+        -- 测试操作test_add_money复用会话/requestId；金额只取服务端配置，不扣库存。
         SellShopResult = 1503,
+        -- 1510 kind=level附带slots(编号/场景显示ID)、unlockedSlots及displayVersion，广播所有客户端。
+        -- interaction/action/result携带entry(home/placement)、slotIndex与原目标/会话代次。
         HomeUpgradeState = 1510,
         HomeUpgradeSnapshotRequest = 1511,
         HomeUpgradeAction = 1512,

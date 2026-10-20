@@ -77,6 +77,9 @@ function EggCollectionController:Start(context)
             runtime.BlockedVersion = math.max(runtime.BlockedVersion, snapshot.version)
             runtime.Snapshot = nil
             Show(false)
+        elseif message.reason == "inventory_capacity_full" then
+            UI:ShowMessageTip("库存已满，无法入库")
+            Render()
         elseif message.reason == "egg_not_mature" then
             UI:ShowMessageTip("鸡蛋尚未孵化")
             Render()

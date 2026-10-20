@@ -247,6 +247,8 @@ function EggCollectionService:Start(context)
         SendState(playerId) -- 只返已有本人目标，不选择附近蛋。
     end)
     runtime.LeaveCallback = Protect(function(playerId)
+        local persistence = context.Services.PersistenceService
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(playerId) end
         if Active() then
             Clear(playerId)
             runtime.ListDeparted[playerId] = true
@@ -278,6 +280,17 @@ function EggCollectionService:Start(context)
     System:BindNotify(context.NetMsg.Messages.EggCollectionListAction, runtime.ListActionCallback)
     context.Events:Subscribe(self.Name, "EggSpawned", function(state) QueueIndex(state); SendList(state.playerId) end)
     context.Events:Subscribe(self.Name, "HomeLevelChanged", function(state) SendList(state.playerId) end)
+    context.Events:Subscribe(self.Name, "PersistenceReady", Protect(function(state)
+        local playerId = state.playerId
+        local persistence = context.Services.PersistenceService
+        if not runtime.Ready or not Integer(playerId) or runtime.ListDeparted[playerId]
+            or not persistence or not persistence:IsReady(playerId)
+            or persistence:GetState(playerId).generation ~= state.generation then return end
+        local snapshot = eggs:GetEggSnapshot(playerId)
+        if not snapshot or snapshot.homeId ~= home:GetPlayerHome(playerId)
+            or not home:IsOwner(playerId, snapshot.homeId) then return end
+        SendList(playerId)
+    end))
     context.Events:Subscribe(self.Name, "EggHatched", function(state) SendList(state.playerId) end)
     context.Events:Subscribe(self.Name, "EggRemoved", function(state) RemoveIndex(state.eggId); SendList(state.playerId) end)
     context.Events:Subscribe(self.Name, "HomeReleased", function(state)

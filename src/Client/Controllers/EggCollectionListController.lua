@@ -260,7 +260,12 @@ function EggCollectionListController:Start(context)
             return end
         runtime.Pending[message.requestId] = nil
         if not message.success then
-            if message.reason == "egg_not_mature" then UI:ShowMessageTip("鸡蛋尚未孵化")
+            local full = message.reason == "inventory_capacity_full"
+            for _, result in ipairs(message.results or {}) do
+                if result.reason == "inventory_capacity_full" then full = true; break end
+            end
+            if full then UI:ShowMessageTip("库存已满，无法入库")
+            elseif message.reason == "egg_not_mature" then UI:ShowMessageTip("鸡蛋尚未孵化")
             else Log:PrintLog("[EggCollectionList] 收取失败", "requestId:", message.requestId, "reason:", tostring(message.reason)) end
         end
     end)

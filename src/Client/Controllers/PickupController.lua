@@ -144,8 +144,17 @@ function PickupController:Start(context)
                 error("PickupResult 消息格式无效")
             end
             local rootId = message.elementId
-            if message.generation ~= runtime.Generation
-                or rootId ~= runtime.TargetElementId then return end
+            if message.generation ~= runtime.Generation then return end
+            if message.carryRetained then
+                if rootId ~= runtime.CarryRootId or message.operation ~= runtime.CarryOperation then return end
+                if message.reason == "inventory_capacity_full" then
+                    UI:ShowMessageTip("库存已满，请先卖出")
+                end
+                return
+            end
+            if rootId ~= runtime.TargetElementId then return end
+            if not message.success and message.operation ~= runtime.TargetOperation then return end
+            if message.reason == "inventory_capacity_full" then UI:ShowMessageTip("库存已满，请先卖出") end
             HideInteraction()
             Log:PrintLog("[PickupController] 收到正式拾取结果",
                 "success:", tostring(message.success),

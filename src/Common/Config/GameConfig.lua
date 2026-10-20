@@ -9,16 +9,19 @@ local GameConfig = {
     },
 
     Persistence = {
-        ProductionEnabled = false, -- 发布验证通过、完整接线后才启用。
+        ProductionEnabled = true, -- 发布验证通过、完整接线后才启用。
+        ValidateReadIntegrity = false, -- 临时关闭读取一致性拦截；写入回读确认仍保留。
         ProbeEnabled = false,
-        ProbeMode = "read", -- 发布验证先write，下局改read；不自动覆盖旧测试记录。
-        ProductionPrefix = "SAC_SAVE1",
-        ProbePrefix = "SAC_TEST1",
-        SegmentCount = 49,
+        ProbeMode = "write", -- 发布验证先write，下局改read；不自动覆盖旧测试记录。
+        ProductionPrefix = "SACSAVE1",
+        ProbePrefix = "SACTEST4",
+        ProbeSegmentCount = 25,
+        ProbePaddingLength = 48000,
+        SegmentCount = 14,
         ValueLimit = 2048,
         SegmentPayload = 1980, -- 留出同批标识/段号/差错校验头部。
     },
-    InventoryCapacity = { Enabled = false, Chickens = 100, Eggs = 100 },
+    InventoryCapacity = { Enabled = true, Chickens = 100, Eggs = 100 },
 
     Zone = {
         HomeTriggerBoxId = 232,
@@ -28,13 +31,16 @@ local GameConfig = {
     Home = {
         MaxPlayers = 6,
         MidJoinTeleportDelaySeconds = 4,
-        RootElementIds = { 228, 568, 588, 608, 628, 648 },
+        RootElementIds = { 2428, 2631, 2704, 2777, 2850, 2923 },
         PurposeProperty = "作用",
         HomePurpose = "家园",
         OwnerNameProperty = "归属玩家",
         ReturnPointPurpose = "家园返回点",
         NamePurpose = "玩家名称",
         PlacementSlotProperty = "放置位",
+        SecondaryBuildingProperty = "建筑",
+        SecondaryBuildingValue = "二级建筑",
+        SecondaryBuildingMinLevel = 9,
         DefaultLevel = 1,
         DefaultChickenCapacity = 5,
         DefaultEggCapacity = 6,
@@ -54,34 +60,41 @@ local GameConfig = {
         SellAllEggsButtonId = 100360,
         SellAllChickensButtonId = 103287,
         BalanceTextId = 100239,
+        TestMoneyEnabled = true,
+        TestMoneyButtonId = 105767,
+        TestMoneyAmount = "100000000",
     },
 
     HomeUpgrade = {
+        InitialUnlockedSlots = 5,
+        UnlockedSlotColor = "#BFB6DFFF",
+        LockedSlotColor = "#8C8C8CFF",
+        SlotColorArea = 1,
         UiGroupId = 102630, ButtonId = 102629, PriceTextId = 102633,
         LevelTextId = 102635, ChickenTextId = 102636, EggTextId = 102637,
         InteractionPurpose = "升级家园", LevelPurpose = "家园等级显示文字显示器",
         MaxDistance = 300, MaxLevel = 20,
     },
     HomeLevels = {
-        { Level = 1, ChickenCapacity = 5, EggCapacity = 6, UpgradeCost = "100" },
-        { Level = 2, ChickenCapacity = 6, EggCapacity = 7, UpgradeCost = "10000" },
-        { Level = 3, ChickenCapacity = 7, EggCapacity = 8, UpgradeCost = "100000" },
-        { Level = 4, ChickenCapacity = 8, EggCapacity = 9, UpgradeCost = "1000000" },
-        { Level = 5, ChickenCapacity = 9, EggCapacity = 10, UpgradeCost = "10000000" },
-        { Level = 6, ChickenCapacity = 10, EggCapacity = 11, UpgradeCost = "100000000" },
-        { Level = 7, ChickenCapacity = 11, EggCapacity = 12, UpgradeCost = "1000000000" },
-        { Level = 8, ChickenCapacity = 12, EggCapacity = 13, UpgradeCost = "10000000000" },
-        { Level = 9, ChickenCapacity = 13, EggCapacity = 14, UpgradeCost = "100000000000" },
-        { Level = 10, ChickenCapacity = 14, EggCapacity = 15, UpgradeCost = "1000000000000" },
-        { Level = 11, ChickenCapacity = 15, EggCapacity = 16, UpgradeCost = "10000000000000" },
-        { Level = 12, ChickenCapacity = 16, EggCapacity = 17, UpgradeCost = "100000000000000" },
-        { Level = 13, ChickenCapacity = 17, EggCapacity = 18, UpgradeCost = "1000000000000000" },
-        { Level = 14, ChickenCapacity = 18, EggCapacity = 19, UpgradeCost = "10000000000000000" },
-        { Level = 15, ChickenCapacity = 19, EggCapacity = 20, UpgradeCost = "100000000000000000" },
-        { Level = 16, ChickenCapacity = 20, EggCapacity = 21, UpgradeCost = "1000000000000000000" },
-        { Level = 17, ChickenCapacity = 21, EggCapacity = 22, UpgradeCost = "10000000000000000000" },
-        { Level = 18, ChickenCapacity = 22, EggCapacity = 23, UpgradeCost = "100000000000000000000" },
-        { Level = 19, ChickenCapacity = 23, EggCapacity = 24, UpgradeCost = "1000000000000000000000" },
+        { Level = 1, ChickenCapacity = 5, EggCapacity = 6, UpgradeCost = "100" },--100
+        { Level = 2, ChickenCapacity = 6, EggCapacity = 7, UpgradeCost = "10000" },--10000
+        { Level = 3, ChickenCapacity = 7, EggCapacity = 8, UpgradeCost = "100000" },--100000
+        { Level = 4, ChickenCapacity = 8, EggCapacity = 9, UpgradeCost = "1000000" },--1000000
+        { Level = 5, ChickenCapacity = 9, EggCapacity = 10, UpgradeCost = "10000000" },--10000000
+        { Level = 6, ChickenCapacity = 10, EggCapacity = 11, UpgradeCost = "100000000" },--100000000
+        { Level = 7, ChickenCapacity = 11, EggCapacity = 12, UpgradeCost = "1000000000" },--1000000000
+        { Level = 8, ChickenCapacity = 12, EggCapacity = 13, UpgradeCost = "10000000000" },--10000000000
+        { Level = 9, ChickenCapacity = 13, EggCapacity = 14, UpgradeCost = "100000000000" },--100000000000
+        { Level = 10, ChickenCapacity = 14, EggCapacity = 15, UpgradeCost = "1000000000000" },--1000000000000
+        { Level = 11, ChickenCapacity = 15, EggCapacity = 16, UpgradeCost = "10000000000000" },--10000000000000
+        { Level = 12, ChickenCapacity = 16, EggCapacity = 17, UpgradeCost = "100000000000000" },--100000000000000
+        { Level = 13, ChickenCapacity = 17, EggCapacity = 18, UpgradeCost = "1000000000000000" },--1000000000000000
+        { Level = 14, ChickenCapacity = 18, EggCapacity = 19, UpgradeCost = "10000000000000000" },--10000000000000000
+        { Level = 15, ChickenCapacity = 19, EggCapacity = 20, UpgradeCost = "100000000000000000" },--100000000000000000
+        { Level = 16, ChickenCapacity = 20, EggCapacity = 21, UpgradeCost = "1000000000000000000" },--1000000000000000000
+        { Level = 17, ChickenCapacity = 21, EggCapacity = 22, UpgradeCost = "10000000000000000000" },--10000000000000000000
+        { Level = 18, ChickenCapacity = 22, EggCapacity = 23, UpgradeCost = "100000000000000000000" },--100000000000000000000
+        { Level = 19, ChickenCapacity = 23, EggCapacity = 24, UpgradeCost = "1000000000000000000000" },--1000000000000000000000
         { Level = 20, ChickenCapacity = 24, EggCapacity = 25, UpgradeCost = nil },
     },
 

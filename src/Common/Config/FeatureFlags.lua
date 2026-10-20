@@ -32,7 +32,7 @@ local FeatureFlags = {
     -- 仅用于避免共享开关在不需要该功能的端产生“未登记模块”警告。
     Scopes = {
         HotbarClickTest = { Server = false, Client = true },
-        Persistence = { Server = true, Client = false },
+        Persistence = { Server = true, Client = true },
         Zone = { Server = true, Client = false },
         Home = { Server = true, Client = true },
         Inventory = { Server = true, Client = false },
@@ -69,7 +69,7 @@ local FeatureFlags = {
         AvatarReadTest = false,
         -- 独立瓦片点击测试已通过，保留代码备用。
         HotbarClickTest = false,
-        Persistence = false,
+        Persistence = true,
         Zone = true,
         Home = true,
         -- 已验收玩法与正式快捷栏保持开启。

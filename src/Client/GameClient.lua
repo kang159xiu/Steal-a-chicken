@@ -1,4 +1,5 @@
 local GameConfig = require "Common.Config.GameConfig"
+local PersistenceController = require "Client.Controllers.PersistenceController"
 local RefreshController = require "Client.Controllers.RefreshController"
 local FeatureFlags = require "Common.Config.FeatureFlags"
 local NetMsg = require "Common.NetMsg"
@@ -67,6 +68,7 @@ function GameClient:Init()
     self.Context.Manager:Register(HomeAssignmentTest)
     self.Context.Manager:Register(AvatarPictureBoardTest)
     self.Context.Manager:Register(AvatarReadTest)
+    self.Context.Manager:Register(PersistenceController)
     self.Context.Manager:Register(PickupController)
     self.Context.Manager:Register(HotbarController)
     self.Context.Manager:Register(SellShopController)

@@ -98,7 +98,9 @@ function PlacementController:Start(context)
         if message.version ~= runtime.RequestVersion then return end
         if not runtime.Snapshot or runtime.Snapshot.elementId ~= runtime.RequestElementId then return end
         runtime.Awaiting = false
-        if message.reason == "capacity_full" then UI:ShowMessageTip("鸡圈已满") end
+        if message.reason == "slot_locked" then UI:ShowMessageTip("升级家园解锁更多格子")
+        elseif message.reason == "capacity_full" then UI:ShowMessageTip("鸡圈已满")
+        elseif message.reason == "inventory_capacity_full" then UI:ShowMessageTip("库存已满，无法入库") end
         if not message.success then
             Log:PrintLog("[PlacementController] 放置交互结果", "action:", message.action,
                 "success:", tostring(message.success), "reason:", tostring(message.reason))

@@ -19,6 +19,12 @@ end
 function SellShopService:ValidateConfig()
     local c = GameConfig.SellShop
     local errors = {}
+    if type(c) == "table" and c.TestMoneyEnabled == true then
+        if not Integer(c.TestMoneyButtonId) or c.TestMoneyButtonId == 0
+            or not Decimal.IsValid(c.TestMoneyAmount) or c.TestMoneyAmount == "0" then
+            errors[#errors + 1] = "测试加钱按钮或金额配置无效"
+        end
+    end
     for _, key in ipairs({ "EggListId", "ChickenListId", "TemplateId", "ImageId", "PriceTextId",
         "AppearanceButtonId", "SelectedBorderId", "SellAllEggsButtonId", "SellAllChickensButtonId", "BalanceTextId" }) do
         if not c or not Integer(c[key]) or c[key] == 0 then errors[#errors + 1] = "SellShop." .. key .. " 必须是正整数" end
@@ -82,7 +88,7 @@ function SellShopService:Start(context)
     runtime.ActionCallback = Protect(function(_, message, playerId)
         if not Integer(playerId) or playerId == 0 or type(message) ~= "table"
             or not Integer(message.sessionGeneration) or not Integer(message.requestId) or message.requestId == 0
-            or (message.action ~= "single" and message.action ~= "all_chickens" and message.action ~= "all_eggs")
+            or (message.action ~= "single" and message.action ~= "all_chickens" and message.action ~= "all_eggs" and message.action ~= "test_add_money")
             or (message.action == "single" and (type(message.itemId) ~= "string" or message.itemId == "")) then return end
         local state = State(playerId)
         if not Current(playerId, state) then return end
@@ -97,6 +103,19 @@ function SellShopService:Start(context)
         if message.requestId <= state.lastRequestId then Result(false, "stale_request"); return end
         state.lastRequestId = message.requestId
         if state.busy then Result(false, "sale_busy"); return end
+        if message.action == "test_add_money" then
+            state.busy = true
+            local called, credited, reason = pcall(function() return economy:AddTestMoney(playerId, state.generation) end)
+            state.busy = false
+            if not called then
+                Log:PrintError("[SellShopService] 测试加钱异常，不重试", "playerId:", playerId, "requestId:", message.requestId, "error:", tostring(credited))
+                Result(false, "test_money_exception")
+            else
+                if not credited then Log:PrintWarning("[SellShopService] 测试加钱拒绝", "playerId:", playerId, "requestId:", message.requestId, "reason:", tostring(reason)) end
+                Result(credited, credited and "test_money_added" or reason, {}, credited and reason or "0")
+            end
+            return
+        end
         -- 固定接收时的集合；新入库不加入，失败项不重试，成功项不回滚。
         local batch = {}
         if message.action == "single" then batch[1] = { itemId = message.itemId }
@@ -144,7 +163,11 @@ function SellShopService:Start(context)
     end)
     context.Events:Subscribe(self.Name, "InventoryChanged", function(snapshot) SendState(snapshot.playerId) end)
     context.Events:Subscribe(self.Name, "EconomyChanged", function(snapshot) SendState(snapshot.playerId) end)
-    runtime.LeaveCallback = function(playerId) runtime.States[playerId] = nil end
+    runtime.LeaveCallback = function(playerId)
+        local persistence = context.Services.PersistenceService
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(playerId) end
+        runtime.States[playerId] = nil
+    end
     System:RegisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback)
     System:BindNotify(messages.SellShopSnapshotRequest, runtime.SnapshotCallback)
     System:BindNotify(messages.SellShopAction, runtime.ActionCallback)

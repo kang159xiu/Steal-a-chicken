@@ -109,11 +109,13 @@ function HomeService:Start(context)
     end
 
     local config = GameConfig.Home
+    local nextTeleportOperationId = 0
     local runtime = {
         Ready = false,
         HomeIds = CopyArray(config.RootElementIds),
         ReturnPointByHome = {},
         PlacementSlotsByElement = {},
+        SecondaryBuildingsByHome = {}, SecondaryBuildingTokens = {},
         EggResourcesByHome = {},
         EggResourcesReady = false,
         UpgradeResourcesByHome = {},
@@ -166,6 +168,32 @@ function HomeService:Start(context)
         return { homeId = slot.homeId, slotIndex = slot.slotIndex, elementId = elementId }
     end
 
+    -- 只返回业务编号和场景显示映射的独立记录，不暴露可写索引。
+    function runtime:GetPlacementSlots(homeId)
+        local slots = {}
+        for elementId, slot in pairs(self.PlacementSlotsByElement) do
+            if slot.homeId == homeId then slots[#slots + 1] = { slotIndex = slot.slotIndex, elementId = elementId } end
+        end
+        table.sort(slots, function(a,b) return a.slotIndex < b.slotIndex end)
+        return slots
+    end
+    function runtime:RefreshSecondaryBuildings(homeId)
+        self.SecondaryBuildingTokens[homeId] = (self.SecondaryBuildingTokens[homeId] or 0) + 1
+        local token, playerId = self.SecondaryBuildingTokens[homeId], self.HomeToPlayer[homeId]
+        context.Timers:AddFrame(HomeService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+            if context.Services.HomeService ~= runtime or not runtime.Ready
+                or runtime.SecondaryBuildingTokens[homeId] ~= token or runtime.HomeToPlayer[homeId] ~= playerId then return end
+            local upgrades = context.Services.HomeUpgradeService
+            local visible = playerId ~= nil and upgrades ~= nil and upgrades:GetLevel(playerId) >= config.SecondaryBuildingMinLevel
+            for _, elementId in ipairs(runtime.SecondaryBuildingsByHome[homeId] or {}) do
+                -- 每次引擎写入前重新确认归属，旧任务不能覆盖新主人。
+                if runtime.SecondaryBuildingTokens[homeId] ~= token or runtime.HomeToPlayer[homeId] ~= playerId then return end
+                local ok, err = pcall(function() Element:SetVisibility(elementId, visible) end)
+                if not ok then Log:PrintError("[HomeBuilding] 显隐失败，仅跳过该元件", "homeId:", homeId, "elementId:", elementId, tostring(err)) end
+            end
+        end)
+    end
+
     -- 仅提供独立资源记录；鸡、蛋及容量占用不归家园模块管理。
     function runtime:GetEggResources(homeId)
         local record = self.EggResourcesByHome[homeId]
@@ -197,6 +225,9 @@ function HomeService:Start(context)
             context.Timers:Remove(operation.timerId)
             operation.timerId = nil
         end
+        context.Events:Publish("HomeTeleportInvalidated", {
+            playerId = playerId, homeId = operation.homeId, operationId = operation.id, reason = reason,
+        })
     end
     runtime.CancelTeleport = CancelTeleport
 
@@ -259,6 +290,8 @@ function HomeService:Start(context)
     end
 
     local function ReleasePlayer(playerId, source)
+        local persistence = context.Services.PersistenceService
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(playerId) end
         CancelTeleport(playerId, source)
         local homeId = runtime.PlayerToHome[playerId]
         if not homeId then
@@ -266,6 +299,7 @@ function HomeService:Start(context)
         end
         runtime.PlayerToHome[playerId] = nil
         runtime.HomeToPlayer[homeId] = nil
+        runtime:RefreshSecondaryBuildings(homeId)
         AuditMappings(source)
         WriteHomeOwner(playerId, homeId, true)
         WriteTreadmillOwner(playerId, homeId, true) -- 先清空再发布释放，避免覆盖事件中分配的新主人。
@@ -305,11 +339,22 @@ function HomeService:Start(context)
             and runtime:IsOwner(operation.playerId, operation.homeId)
     end
 
+    -- 仅校验操作身份；不返回可写操作记录，也不表示角色已实际到达。
+    function runtime:IsTeleportOperationCurrent(playerId, homeId, operationId)
+        local operation = self.TeleportOperationByPlayer[playerId]
+        return operation ~= nil and operation.id == operationId and operation.homeId == homeId
+            and operation.called == true and TeleportOperationValid(operation)
+    end
+
     local function TeleportPlayer(operation)
         if not TeleportOperationValid(operation) or operation.called then return end
         local playerId, position = operation.playerId, operation.position
         operation.called = true
         Character:CharacterTeleport(playerId, position)
+        runtime:RefreshSecondaryBuildings(operation.homeId)
+        context.Events:Publish("HomeTeleportCalled", {
+            playerId = playerId, homeId = operation.homeId, operationId = operation.id, source = operation.source,
+        })
     end
 
     local function AssignPlayer(playerId, source)
@@ -342,7 +387,8 @@ function HomeService:Start(context)
         if not position then
             error("无法读取家园返回点位置，returnPointId=" .. tostring(returnPointId))
         end
-        local operation = { playerId = playerId, homeId = homeId, returnPointId = returnPointId,
+        nextTeleportOperationId = nextTeleportOperationId + 1
+        local operation = { id = nextTeleportOperationId, playerId = playerId, homeId = homeId, returnPointId = returnPointId,
             position = position, source = source }
         runtime.TeleportOperationByPlayer[playerId] = operation
         if source == Events.ON_PLAYER_JOIN_MIDWAY then
@@ -421,6 +467,16 @@ function HomeService:Start(context)
     end
 
     context.Services.HomeService = runtime
+    context.Events:Subscribe(self.Name, "HomeLevelChanged", function(state)
+        if context.Services.HomeService == runtime and runtime:IsOwner(state.playerId, state.homeId) then runtime:RefreshSecondaryBuildings(state.homeId) end
+    end)
+    context.Events:Subscribe(self.Name, "PersistenceReady", function(state)
+        local persistence = context.Services.PersistenceService
+        if context.Services.HomeService ~= runtime or not persistence or not persistence:IsReady(state.playerId)
+            or persistence:GetState(state.playerId).generation ~= state.generation then return end
+        local homeId = runtime:GetPlayerHome(state.playerId)
+        if homeId then runtime:RefreshSecondaryBuildings(homeId) end
+    end)
     System:RegisterEvent(Events.ON_PLAYER_ENTER, runtime.EnterCallback)
     System:RegisterEvent(Events.ON_PLAYER_JOIN_MIDWAY, runtime.JoinCallback)
     System:RegisterEvent(Events.ON_PLAYER_RECONNECTED, runtime.ReconnectCallback)
@@ -457,6 +513,26 @@ function HomeService:Start(context)
         Log:PrintServerLog("[HomeService] 正式家园模块已就绪",
             "homeCount:", #runtime.HomeIds,
             "onlinePlayerCount:", #playerIds)
+
+        -- 二级建筑独立索引；单资源异常不阻断家园、放置或存档。
+        for _, homeId in ipairs(runtime.HomeIds) do
+            local matches, visited = {}, {}
+            local function Visit(elementId)
+                if visited[elementId] then return end
+                visited[elementId] = true
+                local readOk, value = pcall(function()
+                    return CustomProperty:GetCustomProperty(elementId, config.SecondaryBuildingProperty, CustomProperty.PROPERTY_TYPE.String)
+                end)
+                if readOk and value == config.SecondaryBuildingValue then matches[#matches + 1] = elementId
+                elseif not readOk then Log:PrintError("[HomeBuilding] 属性读取失败", "homeId:", homeId, "elementId:", elementId, tostring(value)) end
+                local childOk, children = pcall(function() return Element:GetChildElementsFromElement(elementId) end)
+                if childOk then for _, childId in ipairs(children or {}) do Visit(childId) end
+                else Log:PrintError("[HomeBuilding] 子节点读取失败", "homeId:", homeId, "elementId:", elementId, tostring(children)) end
+            end
+            Visit(homeId)
+            runtime.SecondaryBuildingsByHome[homeId] = matches
+            runtime:RefreshSecondaryBuildings(homeId)
+        end
 
         -- 每家园独立处理名称索引；失败不停止归属/传送，也不影响其他家园名称。
         for _, homeId in ipairs(runtime.HomeIds) do
@@ -526,6 +602,7 @@ function HomeService:Start(context)
             end, Traceback)
             if ok then
                 runtime.PlacementSlotsByElement = placementSlots
+                context.Events:Publish("HomePlacementResourcesReady")
                 Log:PrintServerLog("[HomeService] 放置索引已就绪", "homeCount:", #runtime.HomeIds)
             else
                 runtime.PlacementSlotsByElement = {}
@@ -653,6 +730,9 @@ function HomeService:Stop(context)
         return
     end
     runtime.Ready = false
+    runtime.SecondaryBuildingsByHome, runtime.SecondaryBuildingTokens = {}, {}
+    context.Events:UnsubscribeOwner(self.Name)
+    context.Timers:RemoveOwner(self.Name)
     runtime.EggResourcesReady = false
     runtime.TreadmillResourcesReady = false
     runtime.TreadmillResourcesByHome = {}

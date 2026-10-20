@@ -27,7 +27,39 @@
 ---
 
 ### 待整理变更
-- **2026-10-16｜第12步永久存档与库存容量｜进行中（第一段，发布验证前）**：用户明确授权本轮三段串行实施，当前仅库存与快捷栏唯一写存档底层／编码、库存与经济导出恢复及必要共享文件；另两功能对话无本轮执行任务，主控唯一Markdown。先交付发布验证入口、99个Key清单与2048边界／跨局测试；发布验证通过后才接完整业务。鸡／蛋库存各100项，满鸡禁止偷取，统一满库拒绝且不自动卖出，满替换净数量不增仍允许；容量调用接线未完整前暂不启用限制，避免既有入库失败被当异常。未收场景蛋离开删除且从不保存，不补发离线蛋；其余保存范围、异常策略见第7节。阶段2由区域与家园接场景／成长恢复和加载门禁／保存清理顺序，阶段3偷鸡与守护者接满库拒绝，逐段停写核对。属本批第3个独立任务，当前3/5；未宣称完整存档已实现。
+
+- **2026-10-16｜本轮运行验证确认｜用户实测通过，多人延期**：用户明确确认“读档开关调整、放置位解锁及颜色、二级建筑、测试加钱按钮”的实际运行已验证。上述四项由“已实现待实测”更新为“实际运行已验证”；多人测试未进行，留后续进行，不推定多人同步/隔离、中途加入等多人场景已通过。读取一致性开关仍保持当前false，不因放行通过认定原校验不符根因已修复，不追加改码或重复已通过测试。本条为阶段验收记录，覆盖下方历史待验证状态，不增加独立实施计数。
+
+- **2026-10-16｜临时关闭读取一致性检查｜已实现待实测**：用户明确选择只关闭内容一致性检查并授权实施。仅修改PersistenceService的ReadCommitted及GameConfig，增加Persistence.ValidateReadIntegrity=false；设true可恢复。关闭时不拦截分段批次/段号/段数身份、分段校验、总长度和总校验不符（含前次目录读取，便于正常续存）；仍保留每条2048、可解析目录/分段头、Key段数范围、缺段拒绝、JSON及原业务恢复/会话/加载门禁。备用组写入、逐帧、Set即时回读、整组回读和目录提交代码逐字未变；既有校验诊断保留，不修复/清档/迁移。全Lua5.1语法、限定两文件差异及开关双模式模拟通过各不一致放行/拒绝、超2048、缺段、格式/JSON失败；各业务adapter未修改，非法业务仍按原校验处理。证据C:/Users/Administrator/AppData/Local/Temp/sac-read-integrity-switch-20261016/。不能据放行认定原档完整或根因解决，待运行复测；同存档任务追加不增加独立计数。
+
+- **2026-10-16｜存档完整校验诊断｜已实现待日志复测**：18:21:16日志确认Read在snapshot_validate报snapshot_checksum_mismatch，前序分段检查通过，尚未进入业务恢复；后续测试加钱persistence_not_ready为加载门禁结果。按用户授权仅追加PersistenceService临时[PersistenceChecksumDiag]，正式normal_read记录目录原值/Key、玩家/会话、组/批次/段数，各段标识/负载长度/校验结果，拼接实际与预期长度和校验值并分别标明一致性；不打印资产正文，不改变原assert、加载结果、失败门禁、读写流程或存档，不修复/清档/重试。Lua5.1语法、限定差异和新旧读取函数对照模拟通过仅长度错、仅校验错、全正确、缺段/坏段/格式异常/无档/日志异常；日志不改变读取结果。证据C:/Users/Administrator/AppData/Local/Temp/sac-archive-checksum-diag-20261016/。尚不能认定目录旧或内容修改等根因，待新运行日志；同存档诊断追加不增加独立实施计数。
+
+- **2026-10-16｜归属属性诊断清理｜已完成**：本次18:11:17～18:11:18日志确认家园根2428与跑步机触发盒2430的归属玩家均为千宇宙，即时及两帧后服务端回读equal=true；18:12:01离开清空即时回读一致。用户确认后要求清理，现移除HomeService临时OwnerPropertyDiag、只读回读/计时器/代次与诊断专用来源参数，保留写入、归属校验、补写、清空和必要错误日志。Lua5.1语法通过，清理后源码与本轮诊断前基线逐字一致，未改变业务行为；不推定客户端属性同步已验收。本项同任务追加，不增加独立任务计数。
+
+- **2026-10-16｜归属玩家属性写入诊断｜已实现待日志复测**：按用户明确授权，主控仅修改HomeService两处昵称写入及调用来源标签，追加临时[OwnerPropertyDiag]日志，记录玩家/家园/元件/来源/清空标记/诊断代次、跳过原因、昵称原值类型、属性名、Set返回值和错误；立即及两帧后Get字符串回读，记录原值类型和一致性，不以未抛异常认定成功。诊断代次只控制回读，旧操作/新主人/停止后失效；不重试、不增加属性写入、不改变归属或清空时机。Lua5.1语法和定向实际写入函数模拟通过模块/索引未就绪、归属不符、昵称/Set/Get异常、回读不一致、即时/两帧、清空与迟到隔离。证据C:/Users/Administrator/AppData/Local/Temp/sac-owner-diag-20261016/；根因未确认，待用户当前运行日志。属诊断追加，独立实施计数不增加。
+
+- **2026-10-16｜105767交付及本批相关正文整理｜已实现待验证，已整理**：功能对话未接受转交任务且零写入，主控在当前人类授权对话直接完成5文件，覆盖上条执行方安排。配置SellShop.TestMoneyEnabled=true／TestMoneyButtonId=105767／TestMoneyAmount="10000"；复用1502 action=test_add_money及1503关联结果，EconomyService:AddTestMoney校验开关／在线／会话／读档就绪并精确相加，EconomyChanged接现有1500同步及PersistenceService脏通知，不扣库存。语法Lua5.1、协议唯一、限定5文件差异及实际Lua服务/控制器定向模拟通过：连续累加、重复／旧会话／离线／未Ready／开关／busy／Stop、与出售交叉、10^21加法、余额导出恢复、通知重入和失败不重复发放、按钮注册/注销。证据C:/Users/Administrator/AppData/Local/Temp/sac-test-money-20261016/。本批已完成任务的相关当前规则补入5.8／5.11／5.12，历史记录保留；代码有效检查不重复，编辑器/跨局未验收。第5项实现后计数归零0/5。
+
+- **2026-10-16｜105767测试加钱按钮｜已授权实施**：用户要求开始增加按钮功能，既有库存与快捷栏串行独占经济／出售双端及必要配置／协议注释，主控维护Markdown。点击一次本人加10000，可连续累加；测试开关本轮开启，关闭不绑定按钮且服务端拒绝。金额为服务端配置精确字符串，客户端只提交当前会话与请求身份，复用1500～1503及原去重／锁；校验在线、读档就绪及当前会话，EconomyService加法并发布EconomyChanged，同步100239且走正常保存。无库存扣除、不改存档格式或修复损坏档。检查语法、限定差异、重复／旧会话／关闭／停止与高额余额精确加法，跨局实测待确认。本任务为第5个独立任务，完成时整理本批受影响正文。
+
+- **2026-10-16｜跳过重生与跑步机升级内购｜后续待办，未实施**：用户要求仅记入计划，后期执行，不派发源码任务。“跳过重生”新增付费入口，跳过条件、重生次数、重置范围及倍率变化待确认；“跳过跑步机升级”新增付费入口，升级一级或指定等级、满级处理待确认。两项商品ID、价格、按钮ID及购买验证规则待配置。后续由服务端核验购买结果并防止重复发放，结算成功后同步界面并保存。105767测试加钱按钮方案保持独立，本条不授权实施该按钮；仅文档记录，不增加已实施独立任务计数。
+
+- **2026-10-16｜放置位与二级建筑交付｜已实现待验证**：上述本轮功能已由区域与家园完成并停写，仅7份源码：HomeService／HomeUpgradeService／PlacementService、HomeUpgradeController／PlacementController、GameConfig／NetMsg。家园组件格式改为`{version=2,level,unlockedSlots}`，原测试格式明确拒绝；不迁移、不清档、不增加29Key数量。复用1510同步解锁编号和元件映射；Placement明确依赖HomeUpgrade，提交及恢复均核对解锁。二级建筑按>=9显隐，释放隐藏；保留空家园已有Lv文字及快照。Lua5.1语法、协议唯一性、指定位／最小锁定位升级、重复／旧请求／入口不匹配／三维超距拒绝、20级、非法解锁存档、迟到复制、客户端颜色快照、8→9／高级恢复／释放换主／停止和资源失败隔离的定向模拟通过。其余49份源码与本轮基线哈希一致，主控核对7份最终哈希及限定差异；交付证据在`C:/Users/Administrator/AppData/Local/Temp/sac-slot-unlock-20261016/`。编辑器尚待确认实际颜色、界面、多人及跨局表现；本任务计数仍4/5。此前日志确认正式存档当局44次回读一致、重进ready restored；退出终轮未完成的限制用户已明确接受，本轮不调整。
+
+- **2026-10-16｜放置位独立解锁与二级建筑｜已授权实施**：用户授权既有“偷鸡｜区域与家园”串行独占本轮家园／升级／放置及必要双端、配置与协议，主控维护Markdown，保留已有改动。新玩家固定1～5号，每次家园升级解锁一格；从100047打开升级解锁此次碰撞位，原升级元件入口按编号最小未解锁位。锁定位仍显示100048，点击提示“升级家园解锁更多格子”并打开102630，放置入口按该位置三维300校验；服务端校验位置解锁及容量，扣款／等级／解锁同步提交后通知保存。解锁位区域1=BFB6DF，锁定位=8C8C8C，无论有无鸡；全客户端同步及中途加入快照。家园存档新增具体解锁编号，沿用29Key，不迁移旧测试格式、不自动清档。HomeService递归索引建筑=二级建筑元件，等级>=9可见；传送、读档完成、升级和换主刷新，空家园隐藏，不改碰撞。检查限定差异、语法、事务／旧回调、存取及建筑生命周期；实施后待编辑器实测。本任务为本批第4个独立任务，计数4/5。
+- **2026-10-16｜29Key正式存档接入｜已实现待验证**：用户明确授权正式接入，不再继续排查99Key失败。51Key日志14:35:41首次写到B25（第51），14:35:58重进全51存在／0缺失、readback_ok、已有内容核对true，14:35:59再次完整核对true；该环境并非最多50条，平台容量计量仍未确认。正式改SACSAVE1DIR及A01～A14/B01～B14，共29Key，单段1980负载／最终<=2048、单份<=27720字符；Probe关闭，生产启用，不自动删除或迁移旧测试数据。按用户计划三段串行：存档底层＋库存经济→家园成长与放置周期→偷鸡容量；主控唯一维护文档。读档在传送API后两帧＋1秒，加载完成前门禁；各业务保留权威状态，离开先冻结导出再清理，未收场景蛋不保存且删除，离线不产蛋。逐帧备用组写完校验后提交目录，保存期间新变更仍脏；经验10秒合并及离开训练补存。失败不得覆默认档或截断数据，不将退出后的多帧写入视为平台保证。第一段已完成停写，仅PersistenceService／InventoryService／EconomyService／GameConfig四文件；29Key正式异步写、7组件注册封闭前门禁、脏代次合并、冻结全导出后清理、新会话等离线终轮接口已实现，Lua5.1且coroutine=nil的10项定向及库存100项往返／101拒绝通过，拟定满容量样本14286字符8段，最终业务导出需第二段复核。主控核对精确差异，用户追加允许交功能对话后，现已授权既有“偷鸡｜区域与家园”唯一写入第二段；“偷鸡｜偷鸡与守护者”只读准备第三段，未并发写。接口为RegisterAdapter/SealAdapters/IsReady/MarkDirty/RequestSave/PrepareLeave，恢复done后集中通知，最后PersistenceReady激活。第二段已完成停写，20文件限定差异及主控全部hash核对一致；新增1000/1001存档状态与快照请求、PersistenceController负责失败提示，五适配器接入后Seal，模型全部恢复后Ready，离开清理入口统一前置PrepareLeave。修复同文本不同pendingVersion误清，正式日志含长度／段数／组／revision。真实业务100鸡＋100蛋＋24放置导出13916字符8段，跨会话模拟恢复、复制失败闭锁、迟到副本清理、经验10秒及退出训练补存、满库拒收／净0替换、身份与sequence高水、重生配对、提示／停止检查通过；第一段10项复用仍通过。Persistence最终hash=c639d932ec6a49443d858524f7b76a9526e27fcb639d55ab9bacccc96c1a4ab1。第三段已明确交接既有“偷鸡｜偷鸡与守护者”独占TheftService／PickupController，第二段停写；第三段已完成停写，仅TheftService／PickupController，开始／完成／绑定两次回调／入库复查IsReady、会话及100项容量；迟到入库满保留携带树，未完成绑定失效则解绑并两帧恢复原拾取点，旧会话不能变携带。PickupResult沿既有1214增加operation及carryRetained用于无目标时的当前持鸡满库提示，未新增消息ID；旧提示校验generation/root/operation。Lua语法及定向99/100、异步变满、未就绪、旧会话、重复入库、冻结前置与提示隔离通过，主控核对限定差异／最终hash：Theft=3249DCF445ED90686A5074FDCA61098A1BF1B25FE43EFA61CF7F5F5835559CFB，Pickup=4653EFF7691D0E94688BEDB10914AE4E078D2A5FC59B3EC6BB314E7F2E54FAF8。最终主控调用链核对发现恢复完成后收蛋列表未刷新，已由区域与家园独占单文件补PersistenceReady订阅，旧代次／归属／离开守卫及原session保留；定向20级恢复即刻0/25、旧事件无效与Lua5.1语法通过，最终EggCollection hash=bc6fe67e138d5fb435f92701e3d168e69a20df091bc484f5e007a1dfa679219f。三段全部实现，未发布或操作云存档；跨局恢复与实际容量边界待用户实测；仍属第12步，计数3/5。
+- **2026-10-16｜51Key数量边界测试｜已实现待实测**：99Key日志当局保存及1秒核对通过，重进目录存在但首次在SACTEST3B07检测到缺段；用户反馈面板仅50条，尚不能认定平台上限。用户授权现有存档执行方仅改PersistenceService／GameConfig，主控维护计划；新SACTEST4、每组25段、48000X、共51Key，保持逐帧写入与生命周期守卫。记录不同Key首次写入序号，最后新增应B25；重进及1秒核对逐个诊断全部51Key，缺失项额外直接Get，不改变加载判断。正式存档关闭，旧数据不自动删除。测试需只配置本组51Key并排除旧测试记录干扰；同任务追加，计数仍3/5。执行方已停写；Lua5.1且coroutine=nil定向模拟通过51唯一Key／53次Set及至少1帧间隔、两组目录前25段完整校验、首次序号49/50/51=B23/B24/B25、1秒完整equal=true、重进零写入及全51诊断、缺段／Get异常／损坏继续诊断、代表失败及四类取消和旧锁隔离。主控核对两文件精确差异与最终hash，生产WriteSnapshot体保持不变；51Key清单唯一性通过。最终SHA256：PersistenceService=52E766CFDAF0B7E224BA0EEEC9BEAA7DEF5B6AFD86A7EAF5C49454EB33D36F76，GameConfig=354B870607B544C8717409E58A30A7CEFA3A289F7F4BC9C19E04E01CD6FA6D3E。尚无发布环境跨局结果，不能认定平台上限。
+- **2026-10-16｜恢复99Key并保留逐帧写入｜已实现待实测**：用户提供的14:09～14:10及清除后14:15两轮Standalone日志确认5Key完整保存、退出重进readback_ok／已有内容核对true，未重写；仅限该测试环境与规模，不等于真实资产存档完成。用户明确授权扩大至SACTEST3／49段每组／96000X，存档执行方串行仅改PersistenceService和GameConfig并停写，主控更新本计划及99个唯一Key清单。步骤按1+2×(段数+1)计算，实际101次Set（计划103为算术笔误，开工已说明），相邻至少1帧，目录各组最后、全部成功后1秒回读；其他触发／保护／取消／锁及生产同步接口不变，旧数据不删不迁。Lua5.1且coroutine=nil模拟通过：99Key唯一、101Set帧序、每目录前49段回读、末目录后1秒50次Get完整equal=true，边界／首末段／目录／组衔接代表失败及四类取消、旧回调／新锁隔离通过；未重复全点广测。主控核对精确差异与最终SHA256：Persistence=F7CD3F2E80AAA763DE01B9CCBAEDBA3FE576937595418EFDCBF6E2E07F6FE455，GameConfig=F392DE69E6EF340D899041A4982D81EEE6CD05C1F36938415CBC08FD4662DCAE，Home未改。待用户配置新99Keys、保存完成后退出重进，核对完整49段及内容；不能单独据本轮成败认定原故障唯一原因。属存档任务追加，计数仍3/5。
+- **2026-10-16｜移除逐帧存档测试协程依赖｜已实现待实测**：用户日志两次报global coroutine=nil，均在首次实际Set之前停止Persistence，故5Key跨局测试未执行，不能据此判断容量或持久化。用户明确授权存档执行方串行仅改PersistenceService的WriteProbeAsync，已停写；主控维护本计划。改为固定7步WriteStep，由pcall捕获每步错误并AddFrame(1)推进，源码完全不再引用coroutine；5Key／3000X／7次Set次序、全组校验后目录提交、完成后1秒读回、锁／会话／归属及取消守卫不变。Lua5.1语法及明确coroutine=nil环境的正常写入帧序、7次Set逐一拒绝、6等待点的离开／重连／Home停／Persistence停取消、初始／最终等待、旧回调与新会话锁隔离定向模拟通过。主控核对精确差异仅限该函数及最终SHA256=BF8BEC4A2AE3748E4DD4640B6E01745A44851E29DD0A09122CA396029D38BB0D，Home／GameConfig保持上轮hash。待编辑器核对save_completed、1秒后equal=true及重进完整读取，不宣称跨局成功；计数仍3/5。
+- **2026-10-16｜5Key测试与逐条间隔1帧｜已实现待实测**：用户明确授权存档执行子任务独占PersistenceService／GameConfig，主控核对其他功能对话无执行任务并唯一维护本计划。ProbePrefix改SACTEST2，新增ProbeSegmentCount=2、ProbePaddingLength=3000；测试5个Key清单已更新，正式49段／原命名及ProductionEnabled=false保持，旧数据不删不迁。仅测试写入改专用协程串行，yield在pcall外；7次实际Set为A02边界→A01→A02→DIR→B01→B02→DIR，每次即时回读一致后才隔1帧继续，各组全段再次验证后才提交目录。保持传送后2帧触发，全部成功才打印home trigger action=save_completed并安排1秒完整核对；原两条同步写入结果日志不再使用。Probe同步写入口拒绝绕过间隔；正式WriteSnapshot接口保持。续调核对传送／在线／家园／模块／会话及record锁身份，离开／重分配／停止取消，不回滚重试；旧任务不清新锁。Lua5.1语法与定向模拟通过：Set实际帧2/3/4/5/6/7/8、完整两段回读、已有／坏档不写；逐个注入7次写失败均无完成或成功回读日志，B失败保留A目录；四类取消覆盖6个写入等待点，初始／最终等待与旧会话锁隔离通过。主控核对限定差异和最终SHA256：Persistence=1520E969CB5F2BCB08C6B43A35AE4927A3C1DC4E05144D80AC9364A3FAB16899，GameConfig=2DBC46C96E41CF07D074ABA4CC2E8900093900444F5CCA0D3E2E93E117FE53C7；Home／Codec／FeatureFlags未改，功能方已停写。尚未编辑器实测，不能认定跨局成功或将失败归因于Key数；属第12步追加，计数仍3/5。
+- **2026-10-16｜调整为先保存再等1秒回读｜已实现待实测**：用户再次明确“传送后2帧存档，存档完等1s读档”。覆盖上一条等待顺序，仅存档执行方修改PersistenceService并停写，Home／配置未变。两帧后执行原Probe（保留保存前目录保护与分段内部即时校验），完成后再安排1秒完整读取version／marker／padding；有效已有档不覆盖，异常不补写。增加“1秒后内容核对”equal及reason，已有内容核对不再使用可能误解为跨局成功的日志名。执行前后及1秒回调均校验操作与会话代次，保留离开／重分配／模块停止取消。Lua5.1语法、限定差异及8项定向模拟通过：两帧前零Archive、两帧后原101次Set、1秒后增加50次Get且Set不增；已有／坏档不写，离开／重分配（含迟到旧事件）／Home停／Persistence停及会话变更阻断迟到读取。主控核对实际差异和最终SHA256=0DA972B3DD0F1E698C69C2F604960A441A3FD62C7704B7CBC98E09EB86850A70，Home／配置hash与上一轮一致。待编辑器对照写入日志→1秒后内容核对，延迟回读成功不替代跨局验收；计数仍3/5。
+- **2026-10-16｜家园传送后两帧加1秒读写测试｜已实现待实测**：用户明确授权存档执行子任务独占HomeService／PersistenceService／GameConfig，已停写；主控核对其他功能对话无执行任务并唯一维护文档。移除启动2秒枚举Probe入口，Home在实际调用CharacterTeleport后发布HomeTeleportCalled（playerId／homeId／operationId／source），取消发布HomeTeleportInvalidated；新增IsTeleportOperationCurrent只读布尔身份校验。Persistence立即订阅，自管两帧→1秒，先读目录，ProbeMode恢复write；仅not_found执行原边界和A/B写入，有效目录只核对，损坏或读取异常不写。保留Has／直接Get诊断、无下划线检查与格式次序，不接资产存档，正式存档仍false；Home归属和中途加入4秒流程不变，等待不等于实际抵达。重复同次通知、迟到旧通知、离开／重分配／Home停／Persistence停均隔离并清理自身资源。三文件Lua5.1语法及实际Home／EventBus／TimerRegistry配平台替身的11项模拟通过，覆盖开局／中途／重连、顺序、重复／取消／旧事件及已有／坏档／Get异常零写；未编辑器实测。主控核对限定差异及最终SHA256：Home=5F5CA517E85F081E484CDF78418614E566619AA9489EA69724F924B0213E1C09，Persistence=EEBDF6FC3D5191CA95F7030B8F65295CFFFF454AD67C541B46C7E49463DFCB72，GameConfig=DDFEDB36C38FA976AE775F40DA5393B6557BA74413EE76DCFF47F1ADA38AA9DF。待核对home trigger的schedule_two_frames／schedule_1_second／execute日志与重进目录、跨局完整内容。属第12步追加，计数仍3/5。
+- **2026-10-16｜存档目录读取诊断｜已实现待实测**：用户截图显示新旧测试分段，尚不能证明新目录可读；明确授权既有执行子任务串行仅改PersistenceService和GameConfig并停写，主控唯一维护本计划。ProbeMode改read，正式存档仍关闭；仅测试目录SACTEST1DIR先打印Has原值及类型，Has=false时额外pcall Get，记录原始值／类型／长度／错误后仍按原逻辑not_found；Has=true沿用正常单次Get并记录目录值，原格式、启动等待、加载判断不变。本轮不写档、不覆盖现有数据、不接资产存档。两文件Lua5.1语法、限定差异及5项定向模拟通过：Has=false/Get有值、nil或抛错均维持原判断，Has=true正常分段解码，生产读取不增加Get；每项零Archive Set。主控核对实际差异及最终SHA256：PersistenceService=9D7F3ED5A9CD52AF97082C5E2D8C258B004982465DB9E6F74167A3EED20168BE，GameConfig=017BC5F62EE1CDD019D469ECACA8F6247DA515D1D491E4956FFB46F31F6F2327。待重新进入核对日志directory presence／directory diagnostic Get（或normal Get）与面板同名目录实际值；不得将静态／模拟通过视为跨局成功。属第12步追加，计数仍3/5。
+- **2026-10-16｜无下划线存档测试与诊断｜已实现待发布验证**：用户明确授权本轮，既有执行子任务唯一修改PersistenceService与GameConfig并停写，主控只更新本计划。ProbePrefix改SACTEST1，统一生成SACTEST1DIR／A01～A49／B01～B49，正式SAC_SAVE1及关闭状态保持；旧测试数据不删不迁移。每次测试Set前检查完整Key和值无下划线，nil／空串显式拒绝；分段格式、2048限制、读写顺序与等待不变。补充编码长度／段数／padding长度、完整目录及首段最多120字符预览；目录与首末段代表Key记录context／存在性／类型／长度／一致性，全部分段仍逐项回读校验，避免日志刷屏。仅保存version=1、marker=probe-v1及96000个X，尚不接业务资产存档。两Lua文件5.1语法、真实Codec配JSON／Archive替身的两轮49段A/B及模拟重进通过，601次Archive调用与基线顺序和值一致（仅测试Key变化）；99Key、正式命名、含下划线／nil／空串拒绝、旧新命名空间隔离与会话检查通过。主控核对限定差异及最终SHA256：PersistenceService=C4C1A5C5D575BC76CC2C3AF7B33566BCD3FACA2FAA96895230D8CF0D2EFD4400，GameConfig=DDFEDB36C38FA976AE775F40DA5393B6557BA74413EE76DCFF47F1ADA38AA9DF；Key清单99项且唯一。须用户配置新Key并发布退出重进确认，不能据模拟认定跨局成功或下划线为根因。属第12步追加，计数仍3/5。
+- **2026-10-16｜存档测试玩家ID拦截修复及诊断｜已实现待发布验证**：日志玩家ID=10140737520634053超过目录安全整数上限9007199254740991，Begin错误复用Integer将其静默拒绝。用户明确授权单文件修复；既有库存对话因授权隔离未执行，最终由本主控任务的执行子任务唯一修改PersistenceService并停写，未创建新功能对话。playerId改为项目正整数判断且原值传Archive，目录／revision上限保留；增加PersistenceDiag的Start配置、延迟玩家枚举、Begin结果及具体原因，读写失败记录operation／stage／key／length／error，nil显式转文字且不打印完整档。配置／格式／等待／重试／读写次序不变，不接业务存档。Lua5.1语法、大ID原值透传、revision超限、旧会话／离场／Stop、失败字段定向模拟通过；正常13次Archive调用与单文件基线顺序参数一致，主控核对实际差异与最终SHA256=390B744FFF0FFA75FB3FA9A4A12FB78EFA7616C88F6A05D797DDDEEC80852747。编辑器／发布跨局仍待用户确认；临时诊断验收后再按需清理，计数仍3/5。
+- **2026-10-16｜开启存档发布验证入口｜已配置待验证**：用户明确要求代改测试开关，库存与快捷栏串行仅将FeatureFlags.Values.Persistence=true、GameConfig.Persistence.ProbeEnabled=true及ProbeMode="write"，保持ProductionEnabled=false和InventoryCapacity.Enabled=false。两文件语法及限定三处差异通过，主控按修改前全文核对仅上述三处并核对最终哈希，功能对话已停写。未发布／未实际写档；需用户配置测试组99Key后发布进入、退出重进，核对PersistenceProbe两组写入及跨局内容。属第12步测试配置追加，计数仍3/5。
+- **2026-10-16｜删除初始速度固定500校验｜已实现待验证**：用户明确为测试自由修改BaseWalkSpeed，只删除PlayerSpeedService:ValidateConfig中or c.BaseWalkSpeed ~= 500，不增加替代校验。区域与家园仅改该文件并停写，语法检查通过；主控按修改前全文核对，结果精确等于仅删除该条件后的内容，最终SHA256与交付一致。其他校验、公式、当前配置、协议及权威状态归属不变；编辑器待将BaseWalkSpeed设为测试值后确认模块正常启动和移速生效。属速度／重生测试追加，不另计数，仍3/5；正式玩法初始500的已确认设计不因临时测试变更。
+- **2026-10-16｜第12步永久存档与库存容量｜第一段已实现待发布验证**：用户明确授权本轮三段串行实施，第一段由库存与快捷栏唯一修改存档底层／编码、库存与经济导出恢复及必要共享文件，已完成停写；另两功能对话无本轮执行任务，主控唯一Markdown。先交付发布验证入口、99个Key清单与2048边界／跨局测试；发布验证通过后才接完整业务。鸡／蛋库存各100项，满鸡禁止偷取，统一满库拒绝且不自动卖出，满替换净数量不增仍允许；容量调用接线未完整前暂不启用限制，避免既有入库失败被当异常。未收场景蛋离开删除且从不保存，不补发离线蛋；其余保存范围、异常策略见第7节。阶段2由区域与家园接场景／成长恢复和加载门禁／保存清理顺序，阶段3偷鸡与守护者接满库拒绝，逐段停写核对。属本批第3个独立任务，当前3/5；未宣称完整存档已实现。
 - **2026-10-15｜恢复103995／103997速度升级进度｜已验收**：用户明确恢复旧控件，覆盖本轮重生交付时的停用决定。区域与家园串行仅修改TreadmillController及GameConfig并已停写；103995最大100，以累计经验除下一速度等级累计门槛；103997沿既定单位显示累计／门槛，如1.20k/9.00k，20级满格／最高等级。重生恢复0/1.20k及0进度，离开训练保留；复用1600缓存、现有两帧更新，不新增协议或计时器、不改显隐、100233、重生进度或服务端结算。两文件语法、限定差异及19个速度门槛／归零／旧回调／控件失败隔离定向检查通过，主控核对实际差异及最终两文件SHA256一致；用户随后反馈“实现了”，按本次恢复显示清单记录已验收，不据此扩大整个重生模块的验收范围。属重生显示追加，不另计数，仍2/5。
 - **2026-10-15｜第11步重生与训练速度分离｜已实现待验证**：用户明确继续实施并最终确认初始实际500／20级每级+178满3882、20行重生门槛及训练倍率、经验1197000封顶、旧进度UI停用和100233累计经验。区域与家园唯一串行实施5.14限定范围，主控维护文档；钱币／家园及鸡蛋资产保留，不接内购／存档。最新完整规则见5.14，覆盖旧清钱／速度600及每级+10／10次重生；10份源码已交付停写，语法、协议唯一性、依赖及定向模拟通过，主控核对限定差异、关键提交链与最终10文件SHA256一致；实际移速、模型及多人表现待编辑器验收。本任务计数2/5。
 - **2026-10-15｜守护者20区最大速度曲线｜已实现待验证**：用户明确授权，偷鸡与守护者串行仅修改GameConfig各区Guardian.MaxSpeed，依次600/960/1319/1595/1861/2063/2247/2434/2622/2801/2973/3125/3254/3376/3486/3595/3704/3811/3906/4000；来自确认10锚点等距线性插值取整。19项变化，区域20原4000保留，初始速度／加速度／延迟及其他配置不变。单文件Lua语法、20值及全部最大速度>=初速度、限定差异检查通过，主控核对最终SHA256一致，功能对话已停写。接口及状态归属不变，不混合实施重生。编辑器待低／中／高区追踪及逃脱难度实测。本任务计数1/5。
@@ -701,6 +733,10 @@ System:FireSignEvent("刷新中", playerIds)
 
 ### 5.8 鸡放置模块 `PlacementService`
 
+**2026-10-16验收更新**：用户确认放置位独立解锁及颜色实际运行已验证；多人测试尚未进行，后续补测。
+
+**2026-10-16当前追加（已实现待验证）**：放置服务依赖HomeUpgradeService的IsSlotUnlocked；新玩家1～5号固定解锁，未解锁位拿鸡碰撞仍显示100048，点击100047不扣鸡，打开102630并提示“升级家园解锁更多格子”。放置提交、迟到复制及存档恢复均校验解锁合法性；收回不取消解锁。已解锁位区域1为BFB6DF，未解锁为8C8C8C，不受有无鸡影响，客户端从1510全家园状态更新。
+
 **[已确认]**：
 
 - 玩家碰撞家园放置位时，先验证该放置位属于玩家自己的家园。
@@ -850,6 +886,10 @@ System:FireSignEvent("刷新中", playerIds)
 
 ### 5.11 出售商店模块 `SellShopService` 与钱币 `EconomyService`
 
+**2026-10-16验收更新**：105767测试加钱按钮实际运行经用户验证；多人测试未进行，后续补测。
+
+**2026-10-16测试加钱（已实现待验证）**：105767普通按钮每点本人加10000，不扣库存；配置`SellShop.TestMoneyEnabled`本轮true，按钮与金额分别`TestMoneyButtonId`／`TestMoneyAmount`。金额使用服务端精确字符串，1502新增`test_add_money`操作、沿用会话及requestId去重和操作锁；1503返回本次增量total，余额仍只采用带版本1500状态。EconomyService:AddTestMoney检查在线、当前会话、存档Ready及开关，加法后发布EconomyChanged，接原同步和保存链。关闭开关不绑定按钮、服务端拒绝；Stop注销自身按钮。测试入口不修复损坏档，存档格式/Key不变，内购待办独立。
+
 **当前补充（2026-10-15）：第8步剩余清单用户确认全部通过，已验收。** 第9步精确钱币调整后，GetBalance及1500／1503.balance、1503.total均为无前导零的十进制字符串；单项售价仍安全整数，进入钱币计算时转换，出售玩法及通知顺序不变。静态／定向精确计算通过，升级整合待实测，详见5.12。
 
 **[已确认，2026-10-14]** 用户授权第8步串行实施，当前已实现待验证。商店整体显隐由编辑器扣叮控制，代码不管理面板；任意地图位置可出售本人库存。
@@ -875,6 +915,10 @@ System:FireSignEvent("刷新中", playerIds)
 编辑器待验收：两瓦片100290／100359的列表项UI均100300，开启“元素可响应点击”；每项图标／个体售价正确，单卖移除一次并加对应金额；100360只卖全部库存蛋、103287只卖全部库存鸡，空列表和连续／交叉点击不重复；已放鸡不显示，收回后可售；100239从0更新且单位正确；面板关闭重开列表一致；两人库存／余额隔离；离开再进余额0。批次失败继续及事件重入以本轮定向模拟为证据，实际多人/UI表现等待用户确认。
 
 ### 5.12 家园升级模块 `HomeUpgradeService`
+
+**2026-10-16验收更新**：放置位解锁及颜色、二级建筑显隐实际运行经用户验证；多人测试未进行，后续补测。读档ValidateReadIntegrity=false开关调整亦经用户运行验证，保留业务恢复检查，不代表此前目录/内容校验不符根因已解决。
+
+**2026-10-16当前追加（已实现待验证，覆盖下方旧容量/存档规则）**：HomeUpgradeService唯一管理具体解锁编号，每次升级增加1格；放置入口以碰撞位为三维300目标并解锁该位，原升级入口按最小未解锁编号。扣款、等级、解锁无等待连续提交，扩展1510快照/交互和1512/1513入口身份，旧代次及重复请求不能重复结算。家园存档组件为`{version=2,level,unlockedSlots}`，旧格式明确拒绝，不迁移/清档，正式仍29Key。HomeService递归索引建筑=二级建筑，等级>=9可见，否则隐藏；传送、恢复完成、升级和换主刷新，释放隐藏，带代次防旧回调。空家园原Lv文字及快照保留，新主人覆盖。具体解锁及建筑显隐仍待编辑器验收。
 
 **第9步当前交付（2026-10-15，已实现待验证，覆盖下方历史计划状态）：**两段串行完成并停写。第二段实际修改11份源码：HomeService、PlacementService、EggProductionService、EggCollectionService、GameServer、GameClient、GameConfig、FeatureFlags、NetMsg及新增HomeUpgradeService／HomeUpgradeController；第一段经济、十进制工具、库存和出售文件保持不变。主控核对限定差异、关键提交与容量调用链，最终11文件SHA256与交付清单一致，复用功能对话有效检查。HomeUpgrade双端开启，GameConfig已写入20级表，费用为精确十进制字符串；不接存档。
 
@@ -1100,7 +1144,7 @@ PlayerSpeedService唯一管理在线速度等级和精确经验：初始1级／6
 
 ### 5.16 功能对话分工与当前写入边界
 
-**2026-10-16第12步：第一段实施中。** 库存与快捷栏唯一修改分段存档底层、库存／经济导出恢复、容量接口及必要公共接线；区域与家园、偷鸡与守护者尚未派发本轮执行。主控唯一维护本计划。发布验证门槛和后续串行接续见第7节，完整存档尚未启用。
+**2026-10-16第12步：第一段已交付停写，待发布验证。** 库存与快捷栏唯一修改分段存档底层、库存／经济导出恢复、容量接口及必要公共接线；区域与家园、偷鸡与守护者尚未派发本轮执行。主控唯一维护本计划。发布验证门槛和后续串行接续见第7节，完整存档尚未启用。
 
 
 **2026-10-15第11步：已交付停写，已实现待验证。** 区域与家园串行独占本轮10份源码及公共接线，主控维护本计划与限定核对；权威状态和实际接口见5.14，无后续派发任务。
@@ -1328,7 +1372,7 @@ PlayerRuntime = {
 - `MiscService:Table2JsonStr` / `MiscService:JsonStr2Table`。
 - `MiscService:GetServerTimestamp()`，返回服务器毫秒时间戳。
 
-**[已确认，2026-10-16最新规则] 本游戏需要跨局永久存档。** 本段覆盖旧“单个JSON玩家快照”“未收场景蛋离线继续孵化及重进恢复”等方案，旧方案不再执行。当前第一段实施中，完整业务接入须等待发布环境验证。
+**[已确认，2026-10-16最新规则] 本游戏需要跨局永久存档。** 本段覆盖旧“单个JSON玩家快照”“未收场景蛋离线继续孵化及重进恢复”等方案，旧方案不再执行。当前第一段已实现待发布验证，完整业务接入须等待发布环境验证。
 
 保存内容：精确钱币、库存鸡与已收库存蛋（个体身份、顺序、倍率和售价）、已放置鸡及对应放置位、每只鸡剩余产蛋周期、家园等级、跑步机等级、累计经验、重生次数。速度／容量／训练倍率从等级与配置派生，不存场景元件ID、家园归属ID、会话代次或偷取途中尚未入库的鸡。
 
@@ -1346,6 +1390,247 @@ PersistenceService唯一管理存读流程、版本、脏标记及串行保存�
 
 ---
 
+#### 第12步第一段交付与发布验证（2026-10-16）
+
+**已实现待验证：**新增Common/PersistenceCodec.lua、Server/Services/PersistenceService.lua；修改InventoryService、EconomyService、GameServer、GameConfig、FeatureFlags，共7份源码。功能对话已停写，语法及分段写失败／缺段／损坏／超限／旧会话／同批读取／99Key／2048实写与2049本地拒绝、库存100鸡+100蛋／净替换／恢复身份顺序与个体价值／精确余额的定向模拟通过。模拟中JSON与Archive使用替身，不能替代平台实测。主控核对关键写入提交链、导出恢复及开关位置，最终7文件SHA256与交付一致；未重跑既有有效检查。
+
+2026-10-16用户授权开启验证入口；目录只读诊断后，本轮按最新授权恢复FeatureFlags.Values.Persistence=true、GameConfig.Persistence.ProbeEnabled=true、ProbeMode="write"；ProductionEnabled=false、InventoryCapacity.Enabled=false。测试入口由启动枚举改为家园传送调用后等待两帧，先读取目录，仅not_found时执行既有边界及A/B组写入；完成后再等1秒回读核对。已有有效目录不覆盖，损坏或读取异常不写入。正式业务保存／恢复、加载门禁、离开前快照、0.5秒失败提示及全调用方满库拒绝均尚未接线，现有玩法仍按原在线会话运行。完整永久存档未完成，不得据底层完成标为已验收。
+
+第一段接口：
+
+- PersistenceService:BeginSession(playerId, archiveReady)返回存档会话代次；ProductionEnabled未开或就绪未明确时拒绝。
+- ReadSnapshot(playerId, generation)返回快照，或nil及reason；无目录为not_found，不创建默认档。
+- WriteSnapshot(playerId, generation, snapshot)串行写备用组、完整回读后提交目录；目录提交阶段异常为commit_uncertain，不表示必定未提交，也不能自动清档或宣称持久落盘。成功只表示即时回读一致。
+- InventoryService／EconomyService:ExportSnapshot、RestoreSnapshot各使用本模块会话身份；恢复先预检再提交，返回单次通知函数，供后续整批恢复后发布。存档／库存／经济代次不能直接混用。
+- InventoryService:CheckCapacity(playerId, kind, removeCount, addCount)按净数量检查，满返回inventory_capacity_full。库存紧凑行仅保留身份、类型、顺序和蛋个体权威字段，显示名／图标／count从配置重建；sourceEggId只为历史来源，不作跨局场景查找。
+
+**当前正式29Key接入（2026-10-16，已实现待验证）：**用户要求停止扩容排查，正式使用以下29个String Key。每份14段，每段负载1980字符，最终值不超过2048，完整JSON不超过27720字符。测试Probe关闭；旧SACTEST各组数据不自动删除或迁移，编辑器本轮只配置正式29Key。51Key已由用户日志证实退出重进全51存在且内容校验成功，99Key缺段原因未查明；29Key不是已确认的平台上限。
+
+```text
+SACSAVE1DIR
+SACSAVE1A01
+SACSAVE1A02
+SACSAVE1A03
+SACSAVE1A04
+SACSAVE1A05
+SACSAVE1A06
+SACSAVE1A07
+SACSAVE1A08
+SACSAVE1A09
+SACSAVE1A10
+SACSAVE1A11
+SACSAVE1A12
+SACSAVE1A13
+SACSAVE1A14
+SACSAVE1B01
+SACSAVE1B02
+SACSAVE1B03
+SACSAVE1B04
+SACSAVE1B05
+SACSAVE1B06
+SACSAVE1B07
+SACSAVE1B08
+SACSAVE1B09
+SACSAVE1B10
+SACSAVE1B11
+SACSAVE1B12
+SACSAVE1B13
+SACSAVE1B14
+```
+
+读取：家园传送API调用后两帧再1秒，身份／家园／在线／模块检查有效后读取提交目录指向的完整同批数据。恢复库存、经济、家园等级、累计经验及重生、跑步机、放置鸡及周期全部完成前不开放资产、训练或产蛋；加载／恢复失败保留原档并持续提示，不能写初始空档。无档才按新玩家初值开始。Persistence协调接口RegisterAdapter(name,{Export,Restore,Cleanup})，Restore(playerId,dataOrNil,done)异步完成后done(true,单次notifier)，七字段齐备SealAdapters；统一通知后最后Ready，发布PersistenceReady。IsReady为玩法门禁，MarkDirty下一帧合并、RequestSave正常触发重存、PrepareLeave幂等冻结导出后清理；业务仍持有各自状态。1000 PersistenceState／1001 PersistenceSnapshotRequest由PersistenceController缓存及启动后请求，读失败每0.5秒提示“读取存档失败，请重新进入”，写失败一次提示并继续游玩。
+
+保存：各业务只导出其权威快照，Persistence管理协调和不可变待存文本。逐帧写备用组，回读全组后最后提交目录；下一轮用另一组，不截断、不自动回退旧组。资产及等级变化后合并保存，经验最多10秒合并一次，离开训练补存；新变更不因旧保存完成被清脏。统一离开先冻结导出再清理；离线待存不得使用已清空的运行状态或被旧会话回调改写，平台拒绝或模块停止不得误报成功。退出后的逐帧写入不构成持久保证，正常游玩持续保存。
+
+字段：version=1、inventory（独立鸡蛋与顺序及蛋价值）、economy（精确余额）、home（等级）、speed（累计经验／重生）、treadmill（等级）、placement（鸡身份／类型／放置位编号）、production（对应鸡剩余周期）。不存场景蛋、携带未入库鸡、场景元件ID或家园归属ID；离线不产蛋，重进场景蛋0个，继续剩余周期。库存鸡、蛋分别100项上限；禁止满库存开始偷鸡，收回超限保留场景，替换按净数量检查。
+
+**历史51Key边界测试（2026-10-16，已通过本轮跨局测试）：**测试前缀SACTEST4，每组25段，padding为48000个X，51个String Key。以下为历史测试流程，正式接入以上方29Key为准。
+
+家园传送API调用后等两帧，目录不存在才写入；已有有效档不覆盖，异常不补写。写入为边界A25→A01～A25→DIR→B01～B25→DIR，共53次实际Set，每次即时回读一致后至少等1帧，各组完整校验后提交目录。首次写入的不同Key共51个：A25为第1、A01～A24为第2～25、DIR为第26、B01～B25为第27～51，最后新增SACTEST4B25；重复目录及A25不重复计数。2049字符仍本地拒绝。全部完成后等1秒完整核对；1秒及重进都逐项诊断51Key，不因缺段停止诊断，缺失项记录Has与pcall直接Get结果，诊断不改变加载成功条件。离开、重分配、停止取消旧操作，不使用协程。
+
+重点核对首次写入序号49/50/51（B23/B24/B25）、当局一致性及重进存在性。单次失败不直接确认平台50Key上限；真实业务保存尚未接入。
+
+<details>
+<summary>展开历史测试组51个Key完整清单</summary>
+
+```text
+SACTEST4DIR
+SACTEST4A01
+SACTEST4A02
+SACTEST4A03
+SACTEST4A04
+SACTEST4A05
+SACTEST4A06
+SACTEST4A07
+SACTEST4A08
+SACTEST4A09
+SACTEST4A10
+SACTEST4A11
+SACTEST4A12
+SACTEST4A13
+SACTEST4A14
+SACTEST4A15
+SACTEST4A16
+SACTEST4A17
+SACTEST4A18
+SACTEST4A19
+SACTEST4A20
+SACTEST4A21
+SACTEST4A22
+SACTEST4A23
+SACTEST4A24
+SACTEST4A25
+SACTEST4B01
+SACTEST4B02
+SACTEST4B03
+SACTEST4B04
+SACTEST4B05
+SACTEST4B06
+SACTEST4B07
+SACTEST4B08
+SACTEST4B09
+SACTEST4B10
+SACTEST4B11
+SACTEST4B12
+SACTEST4B13
+SACTEST4B14
+SACTEST4B15
+SACTEST4B16
+SACTEST4B17
+SACTEST4B18
+SACTEST4B19
+SACTEST4B20
+SACTEST4B21
+SACTEST4B22
+SACTEST4B23
+SACTEST4B24
+SACTEST4B25
+```
+
+</details>
+
+**历史99Key逐帧测试（2026-10-16）：**5Key／3000X已在用户提供的Standalone日志中完成两轮保存、退出重进完整读取；第二轮包括用户清除后自动重写。扩大至SACTEST3／49段每组／96000X后，当局完整核对通过，重进首次发现B07缺失，未通过跨局完整性验证。以下步骤及Key清单保留为历史，本轮以以上SACTEST4规则为准。
+
+**发布验证步骤：**
+
+1. 在验证地图开启支持存档的方式，配置下列99个String Key，初值不手填空字符串或默认JSON；不要求新旧命名空间同时配置，同图Key预算仍按最多100设计，旧云端数据不自动删除。
+2. 保持FeatureFlags.Values.Persistence=true、ProbeEnabled=true、ProbeMode="write"、ProbePrefix="SACTEST3"、ProbeSegmentCount=49、ProbePaddingLength=96000；ProductionEnabled与InventoryCapacity.Enabled仍false。正式SAC_SAVE1_DIR／SAC_SAVE1_A01～A49／SAC_SAVE1_B01～B49不变。
+3. 开局／中途加入／重连家园传送API调用后等待两帧，先读取目录，无档才保存；已有有效档只核对，坏档或读取异常不写。中途加入原4秒延迟不变，等待不表示确认实际抵达。
+4. JSON约96046字符、每组49段，内容为version=1、marker=probe-v1、padding=96000个X。保留1980字节负载及D1／P1格式，最终值<=2048、无下划线，不写nil或空串；A49用于2048边界实际写入，2049本地拒绝。
+5. 相邻实际写入至少隔1帧：边界A49→A01～A49→DIR→B01～B49→DIR，实际101次Set（1+2×50，原计划103为计数笔误）。每组完整回读通过后才提交目录；全部成功打印save_completed后，再等1秒完整核对，equal应true。离开／重新分配／模块停止时停止旧操作，失败不重试回滚。
+6. 退出重进同一已发布地图，目录及49段完整读出、已有内容核对通过且不重写。1秒当局回读不替代跨局验证；当前尚未接真实资产存读。
+7. 本轮保留逐帧间隔与传送时机，只扩大规模并换新命名空间；通过可说明99Key在本轮流程可用，不能单独证明原故障唯一原因。验证后关闭测试开关，正式接入仍按原分阶段计划。
+
+日志保留Key／Value下划线检查、JSON长度／段数／padding长度、完整目录及有限首段预览、Has／直接Get诊断和错误原因，不输出完整96000个X。新目录首次not_found属预期。
+
+<details>
+<summary>展开当前测试组99个Key完整清单</summary>
+
+```text
+SACTEST3DIR
+SACTEST3A01
+SACTEST3A02
+SACTEST3A03
+SACTEST3A04
+SACTEST3A05
+SACTEST3A06
+SACTEST3A07
+SACTEST3A08
+SACTEST3A09
+SACTEST3A10
+SACTEST3A11
+SACTEST3A12
+SACTEST3A13
+SACTEST3A14
+SACTEST3A15
+SACTEST3A16
+SACTEST3A17
+SACTEST3A18
+SACTEST3A19
+SACTEST3A20
+SACTEST3A21
+SACTEST3A22
+SACTEST3A23
+SACTEST3A24
+SACTEST3A25
+SACTEST3A26
+SACTEST3A27
+SACTEST3A28
+SACTEST3A29
+SACTEST3A30
+SACTEST3A31
+SACTEST3A32
+SACTEST3A33
+SACTEST3A34
+SACTEST3A35
+SACTEST3A36
+SACTEST3A37
+SACTEST3A38
+SACTEST3A39
+SACTEST3A40
+SACTEST3A41
+SACTEST3A42
+SACTEST3A43
+SACTEST3A44
+SACTEST3A45
+SACTEST3A46
+SACTEST3A47
+SACTEST3A48
+SACTEST3A49
+SACTEST3B01
+SACTEST3B02
+SACTEST3B03
+SACTEST3B04
+SACTEST3B05
+SACTEST3B06
+SACTEST3B07
+SACTEST3B08
+SACTEST3B09
+SACTEST3B10
+SACTEST3B11
+SACTEST3B12
+SACTEST3B13
+SACTEST3B14
+SACTEST3B15
+SACTEST3B16
+SACTEST3B17
+SACTEST3B18
+SACTEST3B19
+SACTEST3B20
+SACTEST3B21
+SACTEST3B22
+SACTEST3B23
+SACTEST3B24
+SACTEST3B25
+SACTEST3B26
+SACTEST3B27
+SACTEST3B28
+SACTEST3B29
+SACTEST3B30
+SACTEST3B31
+SACTEST3B32
+SACTEST3B33
+SACTEST3B34
+SACTEST3B35
+SACTEST3B36
+SACTEST3B37
+SACTEST3B38
+SACTEST3B39
+SACTEST3B40
+SACTEST3B41
+SACTEST3B42
+SACTEST3B43
+SACTEST3B44
+SACTEST3B45
+SACTEST3B46
+SACTEST3B47
+SACTEST3B48
+SACTEST3B49
+```
+
+</details>
+
+---
 ## 8. ID 与资源总表
 
 ### 场景与触发盒
@@ -1814,6 +2099,13 @@ PersistenceService唯一管理存读流程、版本、脏标记及串行保存�
 禁止：不实现重生或内购。
 
 ### 第 11 步：重生与内购接口
+
+**2026-10-16后续内购待办（仅记录，未实施、未派发）**：
+
+- 跳过重生付费入口：具体跳过条件、重生次数、重置范围及倍率变化，在实施前确认。
+- 跳过跑步机升级付费入口：升级一级还是指定等级、满级处理，在实施前确认。
+- 商品ID、价格、按钮ID及购买验证规则均待配置，不预填测试商品或默认奖励。
+- 正式接入须由服务端核验购买结果、防止重复发放，结算成功后同步界面并保存；105767测试加钱按钮作为独立方案处理。
 
 工作：
 

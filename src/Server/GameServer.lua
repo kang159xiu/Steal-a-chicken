@@ -98,7 +98,16 @@ end
 
 function GameServer:OnStart()
     Log:PrintServerLog("[GameServer:OnStart]")
-    return self.Context and self.Context.Manager:Start() or false
+    if not self.Context or not self.Context.Manager:Start() then return false end
+    if GameConfig.Persistence.ProductionEnabled then
+        local persistence = self.Context.Services.PersistenceService
+        local ok, reason = persistence and persistence:SealAdapters()
+        if not ok then
+            Log:PrintError("[Persistence] adapter seal failed; assets remain locked", tostring(reason))
+            return false
+        end
+    end
+    return true
 end
 
 
@@ -120,6 +129,11 @@ function GameServer:OnEnd()
         return
     end
 
+    local persistence = self.Context.Services.PersistenceService
+    if GameConfig.Persistence.ProductionEnabled and persistence then
+        for _, id in ipairs(Character:GetAllPlayerIds() or {}) do persistence:PrepareLeave(id) end
+    end
+    -- Stop随后取消计时器；此处不表示跨帧云写入已完成。
     self.Context.Manager:Stop()
     self.Context.Timers:Clear()
     self.Context.Events:Clear()

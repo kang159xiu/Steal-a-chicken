@@ -295,6 +295,8 @@ function HotbarService:Start(context)
     end
 
     local function ToggleSelection(playerId, itemId)
+        local persistence = context.Services.PersistenceService
+        if GameConfig.Persistence.ProductionEnabled and (not persistence or not persistence:IsReady(playerId)) then return false, "persistence_not_ready" end
         if zone:IsInStolenArea(playerId) then
             SendSnapshot(playerId)
             return false, "hotbar_hidden_in_stolen_area"
@@ -349,6 +351,8 @@ function HotbarService:Start(context)
         end
     end
     runtime.PreleaveCallback = function(playerId)
+        local persistence = context.Services.PersistenceService
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(playerId) end
         if IsPositiveInteger(playerId) then
             CancelSelection(playerId, "player_preleave", nil, false)
             runtime.States[playerId] = nil

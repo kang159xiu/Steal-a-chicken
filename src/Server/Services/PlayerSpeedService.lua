@@ -4,7 +4,7 @@ local PlayerSpeedService = { Name = "PlayerSpeedService", FeatureFlag = "Treadmi
 
 function PlayerSpeedService:ValidateConfig()
     local c = GameConfig.PlayerSpeed
-    if c.DefaultLevel ~= 1 or c.MaxLevel ~= 20 or c.BaseWalkSpeed ~= 500 or c.WalkSpeedPerLevel ~= 178
+    if c.DefaultLevel ~= 1 or c.MaxLevel ~= 20 or c.WalkSpeedPerLevel ~= 178
         or c.MaxWalkSpeed ~= 3882 or not Decimal.IsValid(c.MaxExperience) or #GameConfig.RebirthLevels ~= 20 then
         return false, { "PlayerSpeed配置与已确认规则不一致" }
     end
@@ -23,6 +23,13 @@ function PlayerSpeedService:Start(context)
     local c, economy = GameConfig.PlayerSpeed, context.Services.EconomyService
     local rt = { Active = true, Ready = false, Players = {}, Departed = {}, Dead = {} }
     context.Services.PlayerSpeedService = rt
+    local persistence = context.Services.PersistenceService
+    local function CanPlay(id)
+        return not GameConfig.Persistence.ProductionEnabled or (persistence and persistence:IsReady(id))
+    end
+    local function PrepareLeave(id)
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(id) end
+    end
     local function Active() return rt.Active and context.Services.PlayerSpeedService == rt end
     local function Online(id)
         for _, playerId in ipairs(Character:GetAllPlayerIds() or {}) do if playerId == id then return true end end
@@ -55,7 +62,7 @@ function PlayerSpeedService:Start(context)
         end)
     end
     local function Ensure(id)
-        if not Active() or not rt.Ready or rt.Departed[id] or not Online(id) then return nil end
+        if not CanPlay(id) or not Active() or not rt.Ready or rt.Departed[id] or not Online(id) then return nil end
         local generation = economy:GetSessionGeneration(id)
         if not generation or not economy:IsCurrent(id, generation) then return nil end
         local state = rt.Players[id]
@@ -69,10 +76,11 @@ function PlayerSpeedService:Start(context)
         return state
     end
     function rt:GetSnapshot(id)
-        local state = Ensure(id)
+        local state = rt.Players[id] or Ensure(id)
         return state and Snapshot(state) or nil
     end
     function rt:AddExperience(id, generation, amount)
+        if not CanPlay(id) then return false, "persistence_not_ready" end
         if not Decimal.IsValid(amount) then return false, "invalid_experience" end
         local state = Ensure(id)
         if not state or state.generation ~= generation or not Current(id, state) or rt.Dead[id] then
@@ -81,6 +89,7 @@ function PlayerSpeedService:Start(context)
         if state.experience == c.MaxExperience then return true end
         state.experience = Decimal.Add(state.experience, amount)
         if Decimal.Compare(state.experience, c.MaxExperience) > 0 then state.experience = c.MaxExperience end
+        state.experienceDirty = true
         local previousLevel = state.level
         while state.level < c.MaxLevel and Decimal.Compare(state.experience, GameConfig.RebirthLevels[state.level].ExperienceRequired) >= 0 do
             state.level = state.level + 1
@@ -106,6 +115,7 @@ function PlayerSpeedService:Start(context)
         return result == "" and "0" or result
     end
     function rt:CanRebirth(id, generation, expectedCount)
+        if not CanPlay(id) then return false, "persistence_not_ready" end
         local state = Ensure(id)
         if not state or state.generation ~= generation or not Current(id, state) or rt.Dead[id] then return false, "session_unavailable" end
         if state.rebirthCount ~= expectedCount then return false, "stale_count" end
@@ -130,11 +140,54 @@ function PlayerSpeedService:Start(context)
             return true, function()
                 if notified then return end; notified = true
                 if not Current(id, state) then return end
+                if persistence and CanPlay(id) then persistence:MarkDirty(id, "rebirth_growth") end
                 Apply(id, state); Publish(id, state)
             end
         end
     end
+    function rt:FlushExperience(id)
+        local state = rt.Players[id]
+        if state and state.experienceDirty and CanPlay(id) and persistence then
+            state.experienceDirty = nil
+            persistence:MarkDirty(id, "training_experience")
+        end
+    end
+    if GameConfig.Persistence.ProductionEnabled then
+        assert(persistence:RegisterAdapter("speed", {
+            Export = function(id)
+                local state = rt.Players[id]
+                if not state then return nil, "speed_state_missing" end
+                return { version = 1, experience = state.experience, rebirthCount = state.rebirthCount }
+            end,
+            Restore = function(id, data, done)
+                local experience, count = "0", 0
+                if data then
+                    if data.version ~= 1 or not Decimal.IsValid(data.experience) or Decimal.Compare(data.experience, c.MaxExperience) > 0
+                        or type(data.rebirthCount) ~= "number" or data.rebirthCount < 0 or data.rebirthCount > 20 or data.rebirthCount ~= math.floor(data.rebirthCount) then
+                        done(false, "invalid_speed_snapshot"); return
+                    end
+                    experience, count = data.experience, data.rebirthCount
+                end
+                local generation = economy:GetSessionGeneration(id)
+                if not generation then done(false, "economy_session_missing"); return end
+                local level = 1
+                while level < c.MaxLevel and Decimal.Compare(experience, GameConfig.RebirthLevels[level].ExperienceRequired) >= 0 do level = level + 1 end
+                local state = { generation = generation, level = level, experience = experience, rebirthCount = count, applyVersion = 0 }
+                rt.Players[id], rt.Departed[id] = state, nil
+                done(true, function() Apply(id, state); Publish(id, state); return true end)
+            end,
+            Cleanup = function(id) rt.Leave(id) end,
+        }))
+        context.Events:Subscribe(self.Name, "PersistenceReady", function(event)
+            local state = rt.Players[event.playerId]
+            if state then Apply(event.playerId, state); Publish(event.playerId, state) end
+        end)
+        context.Timers:AddLoopTimer(self.Name, 10, function()
+            if Active() then for id in pairs(rt.Players) do rt:FlushExperience(id) end end
+        end)
+    end
     rt.Leave = function(id)
+        PrepareLeave(id)
         if not Active() then return end
         rt.Departed[id] = true; rt.Players[id] = nil; rt.Dead[id] = nil
     end

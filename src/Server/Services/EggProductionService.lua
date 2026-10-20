@@ -47,6 +47,13 @@ function EggProductionService:Start(context)
     end
     local runtime = { Homes = {}, LastStateByHome = {}, Sequence = 0, GrowthVersion = 0, Stopped = false }
     context.Services.EggProductionService = runtime
+    local persistence = context.Services.PersistenceService
+    local function CanPlay(id)
+        return not GameConfig.Persistence.ProductionEnabled or (persistence and persistence:IsReady(id))
+    end
+    local function PrepareLeave(id)
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(id) end
+    end
     local function Now() return MiscService:GetServerTimestamp() end
     local function GrowthState(egg)
         return { eggId = egg.eggId, homeId = egg.homeId, rootId = egg.rootId,
@@ -136,7 +143,8 @@ function EggProductionService:Start(context)
             house = { homeId = snapshot.homeId, playerId = snapshot.playerId, chickens = {},
                 eggs = {}, count = 0, reserved = 0, chickenCount = 0, lastMs = now }
             runtime.Homes[house.homeId] = house
-        else Advance(house, now) end
+        elseif CanPlay(house.playerId) then Advance(house, now)
+        else house.lastMs = now end
         local nextChickens = {}
         for _, slot in ipairs(snapshot.slots) do
             local previous = house.chickens[slot.slotIndex]
@@ -171,7 +179,7 @@ function EggProductionService:Start(context)
         SendCount(house)
     end
     local function Spawn(house, chicken)
-        if not Current(house) or chicken.pending or chicken.paused or house.count + house.reserved >= Capacity(house.playerId) then return end
+        if not CanPlay(house.playerId) or not Current(house) or chicken.pending or chicken.paused or house.count + house.reserved >= Capacity(house.playerId) then return end
         local resources = home:GetEggResources(house.homeId)
         if not resources or not resources.eggPositionElementId then return end
         house.reserved = house.reserved + 1
@@ -211,6 +219,7 @@ function EggProductionService:Start(context)
             house.eggs[egg.eggId] = egg
             house.count = house.count + 1
             chicken.remainingMs = chicken.config.ProductionIntervalSeconds * 1000
+            if persistence then persistence:MarkDirty(house.playerId, "production_cycle_completed") end
             SendCount(house)
             context.Events:Publish("EggSpawned", Copy(egg))
             System:SendToAllClients(context.NetMsg.Messages.EggGrowthState, GrowthState(egg))
@@ -236,6 +245,7 @@ function EggProductionService:Start(context)
 
     -- 所有未来收取入口共用此同步提交；库存写入只由 InventoryService 执行。
     function runtime:CollectEgg(playerId, eggId, inventory)
+        if not CanPlay(playerId) then return nil, "persistence_not_ready" end
         if type(playerId) ~= "number" or playerId <= 0 or playerId >= math.huge or playerId ~= math.floor(playerId)
             or type(eggId) ~= "number" or eggId <= 0 or eggId >= math.huge or eggId ~= math.floor(eggId) then
             return nil, "invalid_collection"
@@ -334,7 +344,7 @@ function EggProductionService:Start(context)
         local now = Now()
         for _, homeId in ipairs(GameConfig.Home.RootElementIds) do
             local house = runtime.Homes[homeId]
-            if house and Current(house) then
+            if house and Current(house) and CanPlay(house.playerId) then
                 Advance(house, now)
                 local slots = {}
                 for slotIndex in pairs(house.chickens) do slots[#slots + 1] = slotIndex end
@@ -346,6 +356,62 @@ function EggProductionService:Start(context)
             end
         end
     end)
+    if GameConfig.Persistence.ProductionEnabled then
+        assert(persistence:RegisterAdapter("production", {
+            Export = function(id)
+                local homeId = home:GetPlayerHome(id)
+                local house = homeId and runtime.Homes[homeId]
+                if not house then return nil, "production_state_missing" end
+                Advance(house, Now())
+                local rows = {}
+                for slotIndex, chicken in pairs(house.chickens) do
+                    rows[#rows + 1] = { slotIndex, chicken.itemId, math.ceil(chicken.remainingMs) }
+                end
+                table.sort(rows, function(a,b) return a[1] < b[1] end)
+                return { version = 1, cycles = rows }
+            end,
+            Restore = function(id, data, done)
+                if data == nil then data = { version = 1, cycles = {} } end
+                if data.version ~= 1 or type(data.cycles) ~= "table" or not home.EggResourcesReady then done(false, "invalid_production_snapshot"); return end
+                Sync(placement:GetPlacedSnapshot(id))
+                local homeId = home:GetPlayerHome(id)
+                local house = homeId and runtime.Homes[homeId]
+                if not house then done(false, "production_home_missing"); return end
+                local seen, count = {}, 0
+                for key in pairs(data.cycles) do
+                    if type(key) ~= "number" or key < 1 or key > #data.cycles or key ~= math.floor(key) then done(false, "invalid_production_rows"); return end
+                    count = count + 1
+                end
+                if count ~= #data.cycles then done(false, "invalid_production_rows"); return end
+                for _, row in ipairs(data.cycles) do
+                    local chicken = type(row) == "table" and house.chickens[row[1]]
+                    if not chicken or #row ~= 3 or seen[row[1]] or row[2] ~= chicken.itemId or type(row[3]) ~= "number"
+                        or row[3] < 0 or row[3] ~= math.floor(row[3]) or row[3] > math.ceil(chicken.config.ProductionIntervalSeconds * 1000) then
+                        done(false, "invalid_production_cycle"); return
+                    end
+                    seen[row[1]] = true; chicken.remainingMs = row[3]
+                end
+                for slot in pairs(house.chickens) do if not seen[slot] then done(false, "missing_production_cycle"); return end end
+                house.lastMs = Now()
+                done(true, function() SendCount(house); return true end)
+            end,
+            Cleanup = function(id)
+                local homeId = home:GetPlayerHome(id)
+                if homeId then Release(id, homeId) end
+            end,
+        }))
+        context.Events:Subscribe(self.Name, "PersistenceReady", function(event)
+            local homeId = home:GetPlayerHome(event.playerId)
+            local house = homeId and runtime.Homes[homeId]
+            if house then house.lastMs = Now(); SendCount(house) end
+        end)
+        -- 周期进度与经验一样定期合并；产出时立即另标脏，场景蛋从不导出。
+        context.Timers:AddLoopTimer(self.Name, 10, function()
+            for _, house in pairs(runtime.Homes) do
+                if Current(house) and CanPlay(house.playerId) and next(house.chickens) then persistence:MarkDirty(house.playerId, "production_progress") end
+            end
+        end)
+    end
     runtime.Cleanup = function()
         runtime.Stopped = true
         for homeId, house in pairs(runtime.Homes) do Release(house.playerId, homeId) end

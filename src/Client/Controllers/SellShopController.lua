@@ -10,6 +10,10 @@ end
 function SellShopController:ValidateConfig()
     local c = GameConfig.SellShop
     local errors = {}
+    if type(c) == "table" and c.TestMoneyEnabled == true
+        and (not Integer(c.TestMoneyButtonId) or c.TestMoneyButtonId == 0) then
+        errors[#errors + 1] = "测试加钱按钮配置无效"
+    end
     for _, key in ipairs({ "EggListId", "ChickenListId", "TemplateId", "ImageId", "PriceTextId",
         "AppearanceButtonId", "SelectedBorderId", "SellAllEggsButtonId", "SellAllChickensButtonId", "BalanceTextId" }) do
         if not c or not Integer(c[key]) or c[key] == 0 then errors[#errors + 1] = "SellShop." .. key .. " 必须是正整数" end
@@ -171,6 +175,9 @@ function SellShopController:Start(context)
         -- 余额展示只采用带版本的状态消息，避免迟到结果覆盖新余额。
     end)
     runtime.AllEggsCallback = Protect(function() Request("all_eggs") end)
+    runtime.TestMoneyCallback = Protect(function()
+        if c.TestMoneyEnabled == true then Request("test_add_money") end
+    end)
     runtime.AllChickensCallback = Protect(function() Request("all_chickens") end)
     System:BindNotify(messages.SellShopState, runtime.StateCallback)
     System:BindNotify(messages.SellShopResult, runtime.ResultCallback)
@@ -196,6 +203,10 @@ function SellShopController:Start(context)
         runtime.ButtonsBound = true
         UI:RegisterClicked(c.SellAllEggsButtonId, runtime.AllEggsCallback)
         UI:RegisterClicked(c.SellAllChickensButtonId, runtime.AllChickensCallback)
+        if c.TestMoneyEnabled == true then
+            UI:RegisterClicked(c.TestMoneyButtonId, runtime.TestMoneyCallback)
+            runtime.TestMoneyBound = true
+        end
         runtime.Ready = true
         if not runtime.Snapshot then UI:SetText({ c.BalanceTextId }, "0", false) end
         Render()
@@ -220,6 +231,7 @@ function SellShopController:Stop(context)
         UI:UnRegisterClicked(c.SellAllEggsButtonId, runtime.AllEggsCallback)
         UI:UnRegisterClicked(c.SellAllChickensButtonId, runtime.AllChickensCallback)
     end
+    if runtime.TestMoneyBound then UI:UnRegisterClicked(c.TestMoneyButtonId, runtime.TestMoneyCallback) end
     System:UnbindNotify(m.SellShopState, runtime.StateCallback)
     System:UnbindNotify(m.SellShopResult, runtime.ResultCallback)
     System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback)

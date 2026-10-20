@@ -161,12 +161,15 @@ function TheftService:Start(context)
         PreleaveCallback = nil,
     }
 
-    local function SendResult(playerId, rootId, success, reason)
+    local function SendResult(playerId, rootId, success, reason, operation, carryRetained)
+        local chicken = runtime.ChickensByRoot[rootId]
         System:SendToClient(playerId, context.NetMsg.Messages.PickupResult, {
             elementId = rootId,
             generation = runtime.Generation,
             success = success == true,
             reason = reason,
+            operation = operation or (chicken and chicken.operation),
+            carryRetained = carryRetained == true,
         })
     end
 
@@ -211,6 +214,25 @@ function TheftService:Start(context)
     local function ClearPlayerInteraction(playerId)
         runtime.TouchedByPlayer[playerId] = nil
         runtime.HoldByPlayer[playerId] = nil
+    end
+
+    local function IsPlayerReady(playerId)
+        if not GameConfig.Persistence.ProductionEnabled then return true end
+        local persistence = context.Services.PersistenceService
+        return persistence ~= nil and persistence:IsReady(playerId)
+    end
+
+    local function IsSessionCurrent(playerId, session)
+        return not GameConfig.Persistence.ProductionEnabled
+            or (session ~= nil and inventory:GetSessionGeneration(playerId) == session)
+    end
+
+    local function CheckAdmission(playerId)
+        if not IsPlayerReady(playerId) then return false, "persistence_not_ready" end
+        if GameConfig.InventoryCapacity.Enabled then
+            return inventory:CheckCapacity(playerId, "Chicken", 0, 1)
+        end
+        return true
     end
 
     local function RegisterSpawnedChicken(region, spawnPointId, chickenType, result, generation)
@@ -423,8 +445,22 @@ function TheftService:Start(context)
     local function AcquireChicken(playerId, rootId)
         local chicken = runtime.ChickensByRoot[rootId]
         if not chicken or chicken.state ~= "Carried" or chicken.playerId ~= playerId then return end
+        local allowed, admissionReason = CheckAdmission(playerId)
+        if not IsSessionCurrent(playerId, chicken.inventorySession) then
+            allowed, admissionReason = false, "persistence_not_ready"
+        end
+        if not allowed then
+            SendResult(playerId, rootId, false, admissionReason, chicken.operation, true)
+            return
+        end
         local item, reason = inventory:AddChicken(playerId, chicken.chickenType)
-        if not item then error("鸡写入库存失败: " .. tostring(reason)) end
+        if not item then
+            if reason == "inventory_capacity_full" or reason == "persistence_not_ready" then
+                SendResult(playerId, rootId, false, reason, chicken.operation, true)
+                return
+            end
+            error("鸡写入库存失败: " .. tostring(reason))
+        end
         chicken.state = "Owned"
         runtime.CarriedByPlayer[playerId] = nil
         chicken.playerId = nil
@@ -487,6 +523,7 @@ function TheftService:Start(context)
         local rootId = message.elementId
         if message.generation ~= runtime.Generation then return end
         local chicken = runtime.ChickensByRoot[rootId]
+        if chicken and message.operation ~= chicken.operation then return end
         if runtime.TouchedByPlayer[playerId] ~= rootId or not chicken
             or chicken.state ~= "Available" or message.operation ~= chicken.operation then
             Reject(playerId, rootId, "target_not_available")
@@ -502,9 +539,16 @@ function TheftService:Start(context)
         end
         local valid, _, _, _, reason = ValidateDistance(playerId, rootId)
         if not valid then Reject(playerId, rootId, reason) return end
+        local allowed, admissionReason = CheckAdmission(playerId)
+        if not allowed then
+            ClearPlayerInteraction(playerId)
+            Reject(playerId, rootId, admissionReason)
+            return
+        end
         runtime.HoldByPlayer[playerId] = {
             rootId = rootId,
             operation = chicken.operation,
+            inventorySession = inventory:GetSessionGeneration(playerId),
             startedAtMs = MiscService:GetServerTimestamp(),
         }
     end
@@ -547,6 +591,15 @@ function TheftService:Start(context)
         if not chicken or message.operation ~= chicken.operation
             or (hold and hold.operation ~= chicken.operation) then return end
         if not hold or hold.rootId ~= rootId then Reject(playerId, rootId, "hold_not_started") return end
+        local allowed, admissionReason = CheckAdmission(playerId)
+        if not IsSessionCurrent(playerId, hold.inventorySession) then
+            allowed, admissionReason = false, "persistence_not_ready"
+        end
+        if not allowed then
+            ClearPlayerInteraction(playerId)
+            Reject(playerId, rootId, admissionReason)
+            return
+        end
         local elapsedMs = MiscService:GetServerTimestamp() - hold.startedAtMs
         if elapsedMs < config.HoldSeconds * 1000 then
             runtime.HoldByPlayer[playerId] = nil
@@ -586,14 +639,56 @@ function TheftService:Start(context)
         local generation = runtime.Generation
         local pickupPosition = CopyPosition(chickenPosition)
         local manualRepickup = chicken.manualRepickup == true
+        local inventorySession = hold.inventorySession
+        chicken.inventorySession = inventorySession
         runtime.PendingByPlayer[playerId] = rootId
+        local function PendingCurrent()
+            return not runtime.Stopped and context.Services.TheftService == runtime
+                and runtime.Generation == generation and runtime.ChickensByRoot[rootId] == chicken
+                and chicken.operation == operation and chicken.state == "PendingBind"
+                and runtime.PendingByPlayer[playerId] == rootId and chicken.playerId == playerId
+        end
+        local function ValidatePending()
+            if not PendingCurrent() then return false end
+            local validAdmission, pendingReason = CheckAdmission(playerId)
+            if not IsSessionCurrent(playerId, inventorySession) then
+                validAdmission, pendingReason = false, "persistence_not_ready"
+            end
+            if validAdmission then return true end
+            -- 尚未成功携带，不交给守护者；失效后落回本次拾取前的位置。
+            runtime.PendingByPlayer[playerId] = nil
+            chicken.operation = chicken.operation + 1
+            local resetOperation = chicken.operation
+            chicken.playerId = nil
+            chicken.state = "PickupResetting"
+            Element:UnBinding(rootId)
+            SendResult(playerId, rootId, false, pendingReason, message.operation)
+            local function ResetCurrent()
+                return not runtime.Stopped and context.Services.TheftService == runtime
+                    and runtime.Generation == generation and runtime.ChickensByRoot[rootId] == chicken
+                    and chicken.operation == resetOperation and chicken.state == "PickupResetting"
+            end
+            context.Timers:AddFrame(TheftService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+                if not ResetCurrent() then return end
+                Element:SetPosition(rootId, pickupPosition, Element.COORDINATE.World)
+                context.Timers:AddFrame(TheftService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+                    if not ResetCurrent() then return end
+                    if not Element:GetPosition(rootId) then error("取消迟到拾取后无法读取鸡位置") end
+                    if IsPositiveInteger(Element:GetAttachParentCharacter(rootId)) then
+                        error("取消迟到拾取后鸡仍附加在角色上")
+                    end
+                    chicken.state = "Available"
+                end)
+            end)
+            return false
+        end
         Element:SetPosition(rootId, Engine.Vector(
             playerPosition.X,
             playerPosition.Y,
             playerPosition.Z + config.CarryHeight
         ), Element.COORDINATE.World)
         context.Timers:AddFrame(TheftService.Name, config.BindDelayFrames, function()
-            if runtime.ChickensByRoot[rootId] ~= chicken or chicken.operation ~= operation then return end
+            if not ValidatePending() then return end
             Element:BindingToCharacterOrCreature(
                 rootId,
                 playerId,
@@ -601,7 +696,7 @@ function TheftService:Start(context)
                 config.SocketMode
             )
             context.Timers:AddFrame(TheftService.Name, config.VerifyDelayFrames, function()
-                if runtime.ChickensByRoot[rootId] ~= chicken or chicken.operation ~= operation then return end
+                if not ValidatePending() then return end
                 if Element:GetAttachParentCharacter(rootId) ~= playerId then
                     error("正式拾取附加验证失败，rootId=" .. tostring(rootId))
                 end
@@ -639,6 +734,8 @@ function TheftService:Start(context)
     end
     runtime.PreleaveCallback = function(playerId)
         if not IsPositiveInteger(playerId) then return end
+        local persistence = context.Services.PersistenceService
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(playerId) end
         DropPlayerChicken(playerId, "player_preleave")
         ClearOwnedDisplay(playerId, "player_preleave")
         runtime.PendingByPlayer[playerId] = nil

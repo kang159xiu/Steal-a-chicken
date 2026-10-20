@@ -14,6 +14,13 @@ function RebirthService:Start(context)
     local economy, home, messages = context.Services.EconomyService, context.Services.HomeService, context.NetMsg.Messages
     local rt = { Active = true, Ready = false, Locks = {}, Requests = {}, Version = 0 }
     context.Services.RebirthService = rt
+    local persistence = context.Services.PersistenceService
+    local function CanPlay(id)
+        return not GameConfig.Persistence.ProductionEnabled or (persistence and persistence:IsReady(id))
+    end
+    local function PrepareLeave(id)
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(id) end
+    end
     local function Active() return rt.Active and context.Services.RebirthService == rt end
     local function Protect(callback)
         return function(...)
@@ -48,6 +55,7 @@ function RebirthService:Start(context)
         end
     end
     rt.Action = Protect(function(_, request, id)
+        if not CanPlay(id) then return end
         if not rt.Ready or not Integer(id) or type(request) ~= "table" or not Integer(request.requestId)
             or not Integer(request.sessionGeneration) or not Integer(request.expectedCount, true)
             or request.expectedCount > GameConfig.Rebirth.MaxCount then return end
@@ -100,7 +108,7 @@ function RebirthService:Start(context)
     rt.Snapshot = Protect(function(_, request, id)
         if rt.Ready and Integer(id) and type(request) == "table" and next(request) == nil then Send(id) end
     end)
-    rt.Leave = Protect(function(id) Cancel(id); rt.Requests[id] = nil end)
+    rt.Leave = Protect(function(id) PrepareLeave(id); Cancel(id); rt.Requests[id] = nil end)
     rt.Death = Protect(function(id) Cancel(id); if rt.Ready then Send(id) end end)
     rt.Bindings = { { Events.ON_PLAYER_PRELEAVE, rt.Leave }, { Events.ON_PLAYER_RECONNECTED, rt.Leave },
         { Events.ON_CHARACTER_KILLED, rt.Death }, { Events.ON_CHARACTER_DESTROYED, rt.Death } }

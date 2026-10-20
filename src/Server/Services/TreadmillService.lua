@@ -30,6 +30,13 @@ function TreadmillService:Start(context)
     local rt = { Active = true, Ready = false, Players = {}, Departed = {}, Dead = {}, OwnedRoots = {},
         Version = 0, TargetVersion = 0 }
     context.Services.TreadmillService = rt
+    local persistence = context.Services.PersistenceService
+    local function CanPlay(id)
+        return not GameConfig.Persistence.ProductionEnabled or (persistence and persistence:IsReady(id))
+    end
+    local function PrepareLeave(id)
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(id) end
+    end
     local function Active() return rt.Active and context.Services.TreadmillService == rt end
     local function Protect(callback)
         return function(...)
@@ -49,7 +56,7 @@ function TreadmillService:Start(context)
             and economy:IsCurrent(id, state.generation) and home:IsOwner(id, state.homeId)
     end
     local function Inside(id, state)
-        if not Current(id, state) or rt.Dead[id] or state.disabled or not state.rootId then return false end
+        if not CanPlay(id) or not Current(id, state) or rt.Dead[id] or state.disabled or not state.rootId then return false end
         local ok, result = pcall(function() return TriggerBox:IsCharacterInTriggerBox(id, state.triggerId) end)
         if not ok and not state.triggerError then
             state.triggerError = true; Log:PrintError("[Treadmill] 触发盒读取失败", "homeId:", state.homeId, tostring(result))
@@ -92,6 +99,7 @@ function TreadmillService:Start(context)
     local function StopTraining(id, state)
         if not state then return end
         local changed = state.training or (state.operation and state.operation.upgrade)
+        if state.training then speed:FlushExperience(id) end
         state.training = false
         if state.operation and state.operation.upgrade then CancelOperation(state) end
         if changed then state.targetVersion = NextTarget(); Send(id) end
@@ -163,6 +171,7 @@ function TreadmillService:Start(context)
                         state.level = level -- 扣款后立即提交，无等待/引擎调用/通知。
                         notify = value
                     end
+                    if upgrade and persistence then persistence:MarkDirty(id, "treadmill_upgrade") end
                     state.rootId = root; state.operation = nil; state.targetVersion = NextTarget()
                     if not upgrade and Inside(id, state) then state.training = true end
                     if notify then
@@ -188,7 +197,7 @@ function TreadmillService:Start(context)
         return op
     end
     local function Ensure(id)
-        if not Active() or not rt.Ready or rt.Departed[id] or not home.TreadmillResourcesReady then return nil end
+        if not CanPlay(id) or not Active() or not rt.Ready or rt.Departed[id] or not home.TreadmillResourcesReady then return nil end
         local homeId, generation = home:GetPlayerHome(id), economy:GetSessionGeneration(id)
         local state = rt.Players[id]
         if state and (state.homeId ~= homeId or state.generation ~= generation) then Drop(id); state = nil end
@@ -285,7 +294,7 @@ function TreadmillService:Start(context)
         if not rt.Ready or not Integer(id) then return end
         Ensure(id); Send(id)
     end)
-    rt.Leave = Protect(function(id) rt.Departed[id] = true; Drop(id); rt.Dead[id] = nil end)
+    rt.Leave = Protect(function(id) PrepareLeave(id); rt.Departed[id] = true; Drop(id); rt.Dead[id] = nil end)
     rt.Enter = Protect(function(id) rt.Departed[id] = nil; if rt.Ready then Ensure(id) end end)
     rt.Death = Protect(function(id)
         rt.Dead[id] = true
@@ -324,6 +333,7 @@ function TreadmillService:Start(context)
         if not rt.Ready then return end
         for id, state in pairs(rt.Players) do
             if not Current(id, state) then Drop(id)
+            elseif not CanPlay(id) then state.training = false
             elseif state.training then
                 if Inside(id, state) then
                     local amount, reason = speed:GetExperiencePerTick(id, state.generation, rows[state.level].ExperiencePerTick)
@@ -338,6 +348,38 @@ function TreadmillService:Start(context)
         if not rt.Ready then return end
         for id, state in pairs(rt.Players) do if state.training and not Inside(id, state) then StopTraining(id, state) end end
     end))
+    if GameConfig.Persistence.ProductionEnabled then
+        assert(persistence:RegisterAdapter("treadmill", {
+            Export = function(id)
+                local state = rt.Players[id]
+                if not state then return nil, "treadmill_state_missing" end
+                return { version = 1, level = state.level }
+            end,
+            Restore = function(id, data, done)
+                local level = data == nil and 1 or data.level
+                if data and (data.version ~= 1 or not Integer(level) or level > c.MaxLevel) then done(false, "invalid_treadmill_snapshot"); return end
+                local homeId, generation = home:GetPlayerHome(id), economy:GetSessionGeneration(id)
+                local resources = homeId and home:GetTreadmillResources(homeId)
+                if not resources or not resources.triggerId or not resources.positionId or not generation then done(false, "treadmill_resources_missing"); return end
+                Drop(id)
+                local state = { homeId = homeId, generation = generation, level = level, triggerId = resources.triggerId,
+                    positionId = resources.positionId, targetVersion = NextTarget(), training = false, lastRequestId = 0 }
+                rt.Players[id], rt.Departed[id] = state, nil
+                CopyModel(id, state, level, false, function(ok, token)
+                    if not ok then done(false, token); return end
+                    if not Current(id, state) or state.operation ~= token then Destroy(token.rootId); done(false, "restore_expired"); return end
+                    state.rootId, state.operation = token.rootId, nil
+                    token.committed = true
+                    done(true, function() Send(id); return true end)
+                end, true)
+            end,
+            Cleanup = function(id) rt.Leave(id) end,
+        }))
+        context.Events:Subscribe(self.Name, "PersistenceReady", Protect(function(event)
+            local id, state = event.playerId, rt.Players[event.playerId]
+            if state and Current(id, state) then state.training = Inside(id, state); state.targetVersion = NextTarget(); Send(id) end
+        end))
+    end
     rt.Cleanup = function()
         rt.Active = false
         for id in pairs(rt.Players) do Drop(id) end

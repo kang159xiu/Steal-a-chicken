@@ -1,13 +1,11 @@
 local GameConfig = require "Common.Config.GameConfig"
-local FeatureFlags = require "Common.Config.FeatureFlags"
 
 local PlacementService = {
     Name = "PlacementService",
     FeatureFlag = "Placement",
-    Dependencies = { "HomeService", "InventoryService", "HotbarService" },
+    Dependencies = { "HomeService", "InventoryService", "HotbarService", "HomeUpgradeService" },
 }
 
-if FeatureFlags.Values.HomeUpgrade then table.insert(PlacementService.Dependencies, "HomeUpgradeService") end
 
 local function IsPositiveInteger(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
@@ -59,6 +57,14 @@ function PlacementService:Start(context)
         Revision = 0, Committing = false, PositionReadFailures = {} }
     context.Services.PlacementService = runtime
 
+    local persistence = context.Services.PersistenceService
+    local function CanPlay(id)
+        return not GameConfig.Persistence.ProductionEnabled or (persistence and persistence:IsReady(id))
+    end
+    local function PrepareLeave(id)
+        if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(id) end
+    end
+    local restoreOperations = {}
     local function Active()
         return not runtime.Stopped and context.Services.PlacementService == runtime
     end
@@ -80,6 +86,10 @@ function PlacementService:Start(context)
         return snapshot
     end
 
+    local function SlotUnlocked(playerId, slotIndex)
+        local upgrades = context.Services.HomeUpgradeService
+        return upgrades ~= nil and upgrades:IsSlotUnlocked(playerId, slotIndex)
+    end
     local function ChickenCapacity(playerId)
         local upgrades = context.Services.HomeUpgradeService
         if upgrades then return upgrades:GetChickenCapacity(playerId) end
@@ -87,6 +97,7 @@ function PlacementService:Start(context)
     end
 
     local function PublishPlaced(playerId, homeId, cleared)
+        if not cleared and CanPlay(playerId) and persistence then persistence:MarkDirty(playerId, "placement") end
         local snapshot = not cleared and runtime:GetPlacedSnapshot(playerId)
             or { playerId = playerId, homeId = homeId, count = 0, slots = {} }
         if snapshot then context.Events:Publish("PlacedChickensChanged", snapshot) end
@@ -210,7 +221,7 @@ function PlacementService:Start(context)
     end
 
     local function ValidateOperation(operation)
-        if not Active() or operation.invalid then return false end
+        if not CanPlay(operation.playerId) or not Active() or operation.invalid then return false end
         local target = RefreshTarget(operation.playerId)
         if target ~= operation.target or target.operation ~= operation or target.version ~= operation.version
             or runtime.Homes[target.homeId] ~= operation.house
@@ -220,7 +231,8 @@ function PlacementService:Start(context)
         for _, field in ipairs({ "itemId", "kind", "typeId", "displayName", "count", "iconIndex", "sequence" }) do
             if item[field] ~= operation.item[field] then return false end
         end
-        return operation.previous ~= nil or operation.house.count < ChickenCapacity(operation.playerId)
+        return SlotUnlocked(operation.playerId, target.slotIndex)
+            and (operation.previous ~= nil or operation.house.count < ChickenCapacity(operation.playerId))
     end
 
     local function CommitPlacement(operation)
@@ -274,7 +286,7 @@ function PlacementService:Start(context)
     end
 
     runtime.TouchCallback = Protect(function(elementId, playerId)
-        if not runtime.Ready or not IsPositiveInteger(playerId) then
+        if not CanPlay(playerId) or not runtime.Ready or not IsPositiveInteger(playerId) then
             return
         end
         local slot = home:GetPlacementSlot(playerId, elementId)
@@ -305,6 +317,7 @@ function PlacementService:Start(context)
     end)
 
     runtime.ActionCallback = Protect(function(_, message, playerId)
+        if not CanPlay(playerId) then return end
         if not runtime.Ready or not IsPositiveInteger(playerId) or type(message) ~= "table"
             or not IsPositiveInteger(message.version) or not IsPositiveInteger(message.elementId)
             or (message.action ~= "place" and message.action ~= "recall") then return end
@@ -336,6 +349,12 @@ function PlacementService:Start(context)
         local item = SelectedChicken(playerId)
         if not item or item.itemId ~= target.selectedItemId or message.itemId ~= item.itemId then
             Result(playerId, "place", message.version, false, "selected_chicken_required") return
+        end
+        if not SlotUnlocked(playerId, target.slotIndex) then
+            local upgrades = context.Services.HomeUpgradeService
+            local opened, reason = upgrades:OpenPlacementUpgrade(playerId, target.elementId, target.slotIndex)
+            Result(playerId, "place", message.version, false, opened and "slot_locked" or reason)
+            return
         end
         if not previous and house.count >= ChickenCapacity(playerId) then
             Result(playerId, "place", message.version, false, "capacity_full") return
@@ -394,6 +413,8 @@ function PlacementService:Start(context)
         SendState(playerId)
     end)
     runtime.PreleaveCallback = Protect(function(playerId)
+        PrepareLeave(playerId)
+        restoreOperations[playerId] = nil
         ClearTarget(playerId)
         local homeIds = {}
         for homeId, house in pairs(runtime.Homes) do
@@ -401,7 +422,112 @@ function PlacementService:Start(context)
         end
         for _, homeId in ipairs(homeIds) do ClearHome(playerId, homeId) end
     end)
+    if GameConfig.Persistence.ProductionEnabled then
+        assert(persistence:RegisterAdapter("placement", {
+            Export = function(id)
+                local snapshot = runtime:GetPlacedSnapshot(id)
+                if not snapshot then return nil, "home_missing" end
+                local rows = {}
+                for _, slot in ipairs(snapshot.slots) do
+                    local item = slot.chicken
+                    rows[#rows + 1] = { slot.slotIndex, item.itemId, item.typeId, item.sequence }
+                end
+                return { version = 1, slots = rows }
+            end,
+            Restore = function(id, data, done)
+                if data == nil then data = { version = 1, slots = {} } end
+                if data.version ~= 1 or type(data.slots) ~= "table" or #data.slots > ChickenCapacity(id) then done(false, "invalid_placement_snapshot"); return end
+                local homeId = home:GetPlayerHome(id)
+                if not homeId then done(false, "home_missing"); return end
+                local generation = inventory:GetSessionGeneration(id)
+                local inv = inventory:ExportSnapshot(id, generation)
+                if not inv then done(false, "inventory_missing"); return end
+                local usedIds, usedSequences, usedSlots, rows = {}, {}, {}, {}
+                for _, item in ipairs(inventory:GetSnapshot(id)) do usedIds[item.itemId], usedSequences[item.sequence] = true, true end
+                local slotElements = {}
+                for elementId, slot in pairs(home.PlacementSlotsByElement) do
+                    if slot.homeId == homeId then slotElements[slot.slotIndex] = elementId end
+                end
+                local count = 0
+                for key in pairs(data.slots) do
+                    if not IsPositiveInteger(key) or key > #data.slots then done(false, "invalid_placement_rows"); return end
+                    count = count + 1
+                end
+                if count ~= #data.slots then done(false, "invalid_placement_rows"); return end
+                for _, row in ipairs(data.slots) do
+                    if type(row) ~= "table" or #row ~= 4 or not IsPositiveInteger(row[1]) or not slotElements[row[1]]
+                        or type(row[2]) ~= "string" or type(row[3]) ~= "string" or not IsPositiveInteger(row[4])
+                        or row[4] > inv.sequenceHighWater or not SlotUnlocked(id, row[1]) or usedIds[row[2]] or usedSequences[row[4]] or usedSlots[row[1]] then
+                        done(false, "invalid_placement_identity"); return
+                    end
+                    local owner, seq = row[2]:match("^chicken:([1-9][0-9]*):([1-9][0-9]*)$")
+                    local config = GameConfig.ChickenTypes[row[3]]
+                    if not owner or seq ~= string.format("%.0f", row[4]) or not config or not config.Enabled or not IsPositiveInteger(config.TemplateRootId) then
+                        done(false, "invalid_placement_chicken"); return
+                    end
+                    usedIds[row[2]], usedSequences[row[4]], usedSlots[row[1]] = true, true, true
+                    rows[#rows + 1] = { slot = row[1], elementId = slotElements[row[1]], config = config,
+                        item = { itemId = row[2], kind = "Chicken", typeId = row[3], sequence = row[4], count = 1,
+                            displayName = config.DisplayName, iconIndex = config.ChickenIconIndex } }
+                end
+                ClearHome(id, homeId)
+                local house, token = { playerId = id, slots = {}, count = 0 }, {}
+                runtime.Homes[homeId], restoreOperations[id] = house, token
+                local function Valid()
+                    return Active() and restoreOperations[id] == token and runtime.Homes[homeId] == house
+                        and home:IsOwner(id, homeId) and inventory:GetSessionGeneration(id) == generation
+                end
+                local function Fail(reason)
+                    if Valid() then
+                        restoreOperations[id] = nil
+                        ClearHome(id, homeId)
+                        done(false, reason)
+                    end
+                end
+                local index = 0
+                local function Next()
+                    if not Valid() then return end
+                    index = index + 1
+                    local row = rows[index]
+                    if not row then
+                        restoreOperations[id] = nil
+                        done(true, function() PublishPlaced(id, homeId); return true end)
+                        return
+                    end
+                    local position, rotation = Element:GetPosition(row.elementId), Element:GetRotation(row.elementId)
+                    if not position or not rotation then Fail("slot_transform_missing"); return end
+                    local ok, err = pcall(function()
+                        context.ElementCopy:CopyTree(row.config.TemplateRootId, position, "RestorePlacement:" .. tostring(id), function(result)
+                            if not result.success then Fail(result.reason); return end
+                            if not Valid() then DestroyRoot(result.rootId, "late_restore"); return end
+                            local rotated, why = pcall(function() Element:SetRotation(result.rootId, rotation, Element.COORDINATE.World) end)
+                            if not rotated then DestroyRoot(result.rootId, "restore_rotation_failed"); Fail(why); return end
+                            -- 将完整树登记到待恢复house，离开/Stop在两帧等待期间也能清理。
+                            house.slots[row.slot] = { chicken = row.item, rootId = result.rootId }
+                            house.count = house.count + 1
+                            context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+                                if not Valid() then return end
+                                local okTransform, transformError = pcall(function()
+                                    local p, r = Element:GetPosition(result.rootId), Element:GetRotation(result.rootId)
+                                    if not p or not r then error("restore_transform_missing") end
+                                    for _, axis in ipairs({ "X", "Y", "Z" }) do
+                                        if math.abs(p[axis] - position[axis]) > 0.1 or math.abs((r[axis] - rotation[axis] + 180) % 360 - 180) > 0.1 then error("restore_transform_mismatch") end
+                                    end
+                                end)
+                                if not okTransform then Fail(transformError); return end
+                                Next()
+                            end)
+                        end)
+                    end)
+                    if not ok then Fail(err) end
+                end
+                Next()
+            end,
+            Cleanup = function(id) runtime.PreleaveCallback(id) end,
+        }))
+    end
     runtime.Cleanup = function()
+        restoreOperations = {}
         runtime.Stopped = true
         for playerId, target in pairs(runtime.Targets) do
             InvalidateOperation(target)
