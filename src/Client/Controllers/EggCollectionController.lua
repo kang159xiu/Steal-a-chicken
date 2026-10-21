@@ -27,9 +27,13 @@ function EggCollectionController:Start(context)
         })
     end
     local function Render()
-        if not Active() or not runtime.Ready then return false end
+        if not Active() or not runtime.Ready then
+            return false
+        end
         local snapshot = runtime.Snapshot
-        if not snapshot or not snapshot.visible then Show(false); return false end
+        if not snapshot or not snapshot.visible then
+            Show(false); return false
+        end
         local ok, inRange = pcall(function()
             local playerId = Character:GetLocalPlayerId()
             local playerPosition, position = Character:GetPosition(playerId), Element:GetPosition(snapshot.rootId)
@@ -41,7 +45,10 @@ function EggCollectionController:Start(context)
             Log:PrintError("[EggCollectionController] 位置读取失败，取消本次目标", "eggId:", snapshot.eggId,
                 "rootId:", snapshot.rootId, "error:", tostring(inRange))
         end
-        if not ok or not inRange then Cancel(snapshot); return false end
+        if not ok or not inRange then
+            Cancel(snapshot); return false
+        end
+
         Show(true)
         return true
     end
@@ -57,9 +64,13 @@ function EggCollectionController:Start(context)
         if type(message) ~= "table" or not Integer(message.revision, 1) or message.revision <= runtime.Revision
             or not Integer(message.version, 0) or type(message.visible) ~= "boolean" or type(message.busy) ~= "boolean"
             or (message.visible and (not Integer(message.eggId, 1) or not Integer(message.rootId, 1)
-                or not Integer(message.homeId, 1))) then return end
+                or not Integer(message.homeId, 1))) then
+            return
+        end
         runtime.Revision = message.revision
-        if message.visible and message.version <= runtime.BlockedVersion then return end
+        if message.visible and message.version <= runtime.BlockedVersion then
+            return
+        end
         local previous = runtime.Snapshot
         if not previous or previous.eggId ~= message.eggId or previous.version ~= message.version then runtime.Request = nil end
         runtime.Snapshot = { revision = message.revision, version = message.version, eggId = message.eggId,
@@ -102,6 +113,7 @@ function EggCollectionController:Start(context)
     System:BindNotify(context.NetMsg.Messages.EggCollectionResult, runtime.ResultCallback)
     context.Timers:AddTimer(self.Name, GameConfig.Runtime.ServerReadyDelaySeconds, Protect(function()
         runtime.Ready = true
+
         UI:RegisterClicked(config.CollectButtonId, runtime.ClickCallback)
         runtime.ClickRegistered = true
         Render()

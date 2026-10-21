@@ -22,7 +22,9 @@ function EggCollectionService:Start(context)
     local function Active() return not runtime.Stopped and context.Services.EggCollectionService == runtime end
     local function Protect(callback)
         return function(...)
-            if not Active() then return end
+            if not Active() then
+                return
+            end
             local args = { n = select("#", ...), ... }
             local ok, errorMessage = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
             if not ok then context.Manager:FailModule(self.Name, tostring(errorMessage)) end
@@ -38,6 +40,8 @@ function EggCollectionService:Start(context)
     end
     local function SendList(playerId, released)
         if not Active() or not runtime.Ready then return end
+        local pendingSession = runtime.ListSessions[playerId]
+        if not released and pendingSession and pendingSession.batchSync then return end
         local snapshot = not released and not runtime.ListDeparted[playerId] and eggs:GetEggSnapshot(playerId) or nil
         local homeId = snapshot and snapshot.homeId or nil
         local session = runtime.ListSessions[playerId]
@@ -63,12 +67,11 @@ function EggCollectionService:Start(context)
         if not runtime.Ready or not Integer(playerId) or runtime.ListDeparted[playerId] or type(message) ~= "table"
             or not Integer(message.homeId) or not Integer(message.homeVersion) or not Integer(message.requestId)
             or (message.action ~= "single" and message.action ~= "all")
-            or (message.action == "single" and not Integer(message.eggId)) then
-            return end
+            or (message.action == "single" and not Integer(message.eggId)) then return end
         local session = runtime.ListSessions[playerId]
         local function Result(success, reason, results)
-            if not Active() or runtime.ListSessions[playerId] ~= session then
-                return end
+            if not Active() or runtime.ListSessions[playerId] ~= session then return end
+
             System:SendToClient(playerId, context.NetMsg.Messages.EggCollectionListResult, {
                 homeId = message.homeId, homeVersion = message.homeVersion, requestId = message.requestId,
                 action = message.action, eggId = message.eggId, success = success, reason = reason, results = results or {},
@@ -95,29 +98,67 @@ function EggCollectionService:Start(context)
             table.sort(ids)
         end
         session.busy = true
-        local results, success = {}, true
-        for _, eggId in ipairs(ids) do
-            if not Active() or runtime.ListSessions[playerId] ~= session
-                or not home:IsOwner(playerId, message.homeId) then
-                return end
-            local ok, item, reason = pcall(function() return eggs:CollectEgg(playerId, eggId, inventory) end)
-            if not ok then
-                Log:PrintError("[EggCollectionList] 收取调用异常，不重试", "eggId:", eggId, "error:", tostring(item))
-                item, reason = nil, "collection_exception"
-            end
-            if not item then success = false end
-            results[#results + 1] = { eggId = eggId, success = item ~= nil, reason = reason }
+        local finishInventory, finishCount
+        if message.action == "all" then
+            local reason
+            finishInventory, reason = inventory:BeginChangeBatch(playerId)
+            if not finishInventory then session.busy = false; Result(false, reason); return end
+            finishCount, reason = eggs:BeginCountBatch(playerId, message.homeId)
+            if not finishCount then pcall(finishInventory); session.busy = false; Result(false, reason); return end
+            session.batchSync = true
         end
-        if not Active() or runtime.ListSessions[playerId] ~= session then
-            return end
-        session.busy = false
-        Result(success, not success and (message.action == "single" and results[1].reason or "partial_failure") or "collected", results)
-        SendList(playerId)
+
+        local results, success = {}, true
+        local batchOk, batchError = pcall(function()
+            for _, eggId in ipairs(ids) do
+                if not Active() or runtime.ListSessions[playerId] ~= session
+                    or not home:IsOwner(playerId, message.homeId) then return end
+
+                local ok, item, reason = pcall(function() return eggs:CollectEgg(playerId, eggId, inventory) end)
+                if not ok then
+                    Log:PrintError("[EggCollectionList] 收取调用异常，不重试", "eggId:", eggId, "error:", tostring(item))
+                    item, reason = nil, "collection_exception"
+                end
+
+                if not item then success = false end
+                results[#results + 1] = { eggId = eggId, success = item ~= nil, reason = reason }
+            end
+        end)
+
+        local function Finish(callback, label)
+            if not callback then return 0 end
+            local finished, count = pcall(callback)
+            if not finished then
+                pcall(function() Log:PrintError("[EggCollectionList] 批次异常或最终通知失败", "playerId:", playerId, "requestId:", message.requestId, "stage:", label, "error:", count) end)
+                return 0
+            end
+            return count
+        end
+        Finish(finishInventory, "inventory")
+        Finish(finishCount, "count")
+        session.batchSync, session.busy = nil, false
+        if not batchOk then
+            success = false
+            pcall(function() Log:PrintError("[EggCollectionList] 批次异常或最终通知失败", "playerId:", playerId, "requestId:", message.requestId, "error:", batchError) end)
+        end
+        if not Active() or runtime.ListSessions[playerId] ~= session or not home:IsOwner(playerId, message.homeId) then return end
+
+        local function FinalList()
+
+            SendList(playerId)
+        end
+        if message.action == "all" then
+            local sent, sendError = pcall(FinalList)
+            if not sent then pcall(function() Log:PrintError("[EggCollectionList] 批次异常或最终通知失败", "playerId:", playerId, "requestId:", message.requestId, "stage:", "list", "error:", sendError) end) end
+        end
+        Result(success, not success and (not batchOk and "collection_exception" or message.action == "single" and results[1].reason or "partial_failure") or "collected", results)
+        if message.action == "single" then FinalList() end
     end)
     local function SendState(playerId)
         if not Active() then return end
         local target = runtime.Targets[playerId]
         runtime.Revision = runtime.Revision + 1
+
         System:SendToClient(playerId, context.NetMsg.Messages.EggCollectionState, {
             revision = runtime.Revision, version = target and target.version or runtime.Sequence,
             eggId = target and target.eggId, rootId = target and target.rootId, homeId = target and target.homeId,
@@ -172,17 +213,26 @@ function EggCollectionService:Start(context)
         for _, playerId in ipairs(players) do Clear(playerId) end
     end
     local function QueueIndex(egg)
-        if not Active() or not runtime.Ready then return end
+
+        if not Active() or not runtime.Ready then
+            return
+        end
         local previous = runtime.IndexByEgg[egg.eggId]
-        if previous and previous.rootId == egg.rootId and previous.version == egg.version then return end
+        if previous and previous.rootId == egg.rootId and previous.version == egg.version then
+            return
+        end
         RemoveIndex(egg.eggId)
         local entry = { eggId = egg.eggId, rootId = egg.rootId, homeId = egg.homeId,
             playerId = egg.playerId, version = egg.version }
         runtime.IndexByEgg[egg.eggId] = entry
         context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
-            if not Active() or not runtime.Ready or runtime.IndexByEgg[entry.eggId] ~= entry then return end
+            if not Active() or not runtime.Ready or runtime.IndexByEgg[entry.eggId] ~= entry then
+                return
+            end
             local current = eggs:GetSceneEgg(entry.eggId)
-            if not current or current.rootId ~= entry.rootId or current.version ~= entry.version then return end
+            if not current or current.rootId ~= entry.rootId or current.version ~= entry.version then
+                return
+            end
             local ok, result = pcall(function()
                 if not Element:GetPosition(entry.rootId) then error("蛋根对象不可用") end
                 local ids, visited = {}, {}
@@ -205,15 +255,26 @@ function EggCollectionService:Start(context)
         end)
     end
     runtime.TouchCallback = Protect(function(elementId, playerId)
-        if not Active() or not runtime.Ready or not Integer(playerId) or runtime.Dead[playerId] then return end
+        if not Active() or not runtime.Ready or not Integer(playerId) or runtime.Dead[playerId] then
+            return
+        end
         local entry = runtime.IndexByElement[elementId]
-        if not entry then return end
+        if not entry then
+            return
+        end
         local egg = eggs:GetSceneEgg(entry.eggId)
+
         if not egg or egg.rootId ~= entry.rootId or egg.version ~= entry.version
-            or egg.playerId ~= playerId or not home:IsOwner(playerId, egg.homeId) then return end
-        if not InRange(playerId, entry) then return end
+            or egg.playerId ~= playerId or not home:IsOwner(playerId, egg.homeId) then
+            return
+        end
+        if not InRange(playerId, entry) then
+            return
+        end
         local previous = runtime.Targets[playerId]
-        if previous and previous.eggId == egg.eggId and previous.rootId == egg.rootId then return end
+        if previous and previous.eggId == egg.eggId and previous.rootId == egg.rootId then
+            return
+        end
         local target = { eggId = egg.eggId, rootId = egg.rootId, homeId = egg.homeId,
             version = NextVersion(), busy = false }
         runtime.Targets[playerId] = target
@@ -278,7 +339,9 @@ function EggCollectionService:Start(context)
     System:BindNotify(context.NetMsg.Messages.EggCollectionSnapshotRequest, runtime.SnapshotCallback)
     System:BindNotify(context.NetMsg.Messages.EggCollectionListSnapshotRequest, runtime.ListSnapshotCallback)
     System:BindNotify(context.NetMsg.Messages.EggCollectionListAction, runtime.ListActionCallback)
-    context.Events:Subscribe(self.Name, "EggSpawned", function(state) QueueIndex(state); SendList(state.playerId) end)
+    context.Events:Subscribe(self.Name, "EggSpawned", function(state)
+        QueueIndex(state); SendList(state.playerId)
+    end)
     context.Events:Subscribe(self.Name, "HomeLevelChanged", function(state) SendList(state.playerId) end)
     context.Events:Subscribe(self.Name, "PersistenceReady", Protect(function(state)
         local playerId = state.playerId
@@ -291,7 +354,9 @@ function EggCollectionService:Start(context)
             or not home:IsOwner(playerId, snapshot.homeId) then return end
         SendList(playerId)
     end))
-    context.Events:Subscribe(self.Name, "EggHatched", function(state) SendList(state.playerId) end)
+    context.Events:Subscribe(self.Name, "EggHatched", function(state)
+        SendList(state.playerId)
+    end)
     context.Events:Subscribe(self.Name, "EggRemoved", function(state) RemoveIndex(state.eggId); SendList(state.playerId) end)
     context.Events:Subscribe(self.Name, "HomeReleased", function(state)
         Clear(state.playerId)
@@ -308,6 +373,7 @@ function EggCollectionService:Start(context)
     context.Timers:AddTimer(self.Name, GameConfig.Runtime.ServerReadyDelaySeconds, function()
         if not Active() then return end
         runtime.Ready = true
+
         for _, playerId in ipairs(Character:GetAllPlayerIds() or {}) do
             local snapshot = eggs:GetEggSnapshot(playerId)
             for _, egg in ipairs(snapshot and snapshot.eggs or {}) do QueueIndex(egg) end

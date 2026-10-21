@@ -36,15 +36,7 @@ function EggGrowthController:Start(context)
         Log:PrintError("[EggGrowthController] 表现失败，仅跳过对应表现", "eggId:", entry.state.eggId,
             "rootId:", entry.state.rootId, "action:", action, "error:", tostring(message))
     end
-    local function StopAnimation(entry)
-        if entry.animating and runtime.RootOwners[entry.state.rootId] == entry then
-            entry.animating = false
-            local ok, errorMessage = pcall(function() Element:StopScaleTo(entry.state.rootId) end)
-            if not ok then Error(entry, "StopScaleTo", errorMessage) end
-        end
-    end
     local function Discard(entry)
-        StopAnimation(entry)
         runtime.Refreshing[entry.state.eggId] = nil
         if runtime.RootOwners[entry.state.rootId] == entry then runtime.RootOwners[entry.state.rootId] = nil end
         if runtime.Entries[entry.state.eggId] == entry then runtime.Entries[entry.state.eggId] = nil end
@@ -97,15 +89,6 @@ function EggGrowthController:Start(context)
             end
         end
     end
-    local function FinalScale(entry)
-        if entry.scaleFailed then return end
-        StopAnimation(entry)
-        local target = entry.state.finalScale
-        local ok, errorMessage = pcall(function()
-            Element:SetScale(entry.state.rootId, Engine.Vector(target, target, target))
-        end)
-        if not ok then entry.scaleFailed = true; Error(entry, "SetScale", errorMessage) end
-    end
     local function Apply(entry)
         if not Current(entry) then return end
         -- 两帧后再读取对象；不存在或读取失败只记录一次，不增加重试链。
@@ -115,19 +98,13 @@ function EggGrowthController:Start(context)
             return
         end
         IndexText(entry)
-        local currentScale, price, multiplier, remaining = Progress(entry.state, MiscService:GetServerTimestamp())
+        local _, price, multiplier, remaining = Progress(entry.state, MiscService:GetServerTimestamp())
         UpdateText(entry, price, multiplier)
-        if remaining <= 0 then FinalScale(entry); return end
-        local target = entry.state.finalScale
-        local ok, errorMessage = pcall(function()
-            Element:ScaleTo(entry.state.rootId, Engine.Vector(target, target, target), remaining, Element.CURVE.linear,
-                Engine.Vector(currentScale, currentScale, currentScale))
-        end)
-        if ok then entry.animating = true
-        else entry.scaleFailed = true; Error(entry, "ScaleTo", errorMessage) end
-        if entry.valueElementId or entry.multiplierElementId or entry.animating then
-            runtime.Refreshing[entry.state.eggId] = entry
+
+        if remaining <= 0 then
+            return
         end
+        if entry.valueElementId or entry.multiplierElementId then runtime.Refreshing[entry.state.eggId] = entry end
     end
     local function Queue(entry)
         context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
@@ -188,7 +165,6 @@ function EggGrowthController:Start(context)
                 local _, price, multiplier, remaining = Progress(entry.state, now)
                 UpdateText(entry, price, multiplier)
                 if remaining <= 0 then
-                    FinalScale(entry)
                     runtime.Refreshing[eggId] = nil
                 end
             end
@@ -196,7 +172,6 @@ function EggGrowthController:Start(context)
     end)
     runtime.Cleanup = function()
         runtime.Stopped = true
-        for _, entry in pairs(runtime.Entries) do StopAnimation(entry) end
         runtime.Entries, runtime.Versions, runtime.RootOwners, runtime.Refreshing = {}, {}, {}, {}
     end
 end

@@ -60,6 +60,7 @@ function InventoryService:Start(context)
         NextSession = 0,
         Departed = {},
         Restored = {},
+        ChangeBatches = {},
     }
 
     local function CanMutate(playerId)
@@ -68,6 +69,7 @@ function InventoryService:Start(context)
         return persistence ~= nil and persistence:IsReady(playerId)
     end
     function runtime:BeginLoadSession(playerId)
+        self.ChangeBatches[playerId] = nil
         self.NextSession = self.NextSession + 1
         self.SessionIds[playerId], self.Departed[playerId], self.Restored[playerId] = self.NextSession, nil, nil
         self.Players[playerId] = { Chickens = {}, ChickenOrder = {}, Eggs = {}, EggOrder = {} }
@@ -120,11 +122,39 @@ function InventoryService:Start(context)
     end
 
     local function PublishChanged(playerId, reason)
+        local batch = runtime.ChangeBatches[playerId]
+        if batch then
+            batch.changed, batch.reason = true, reason
+            return
+        end
+
+        local items = runtime:GetSnapshot(playerId)
+
         context.Events:Publish("InventoryChanged", {
             playerId = playerId,
             reason = reason,
-            items = runtime:GetSnapshot(playerId),
+            items = items,
         })
+    end
+
+    -- 仅由一键操作持有；结束前不生成全库存快照，不广播中间状态。
+    function runtime:BeginChangeBatch(playerId)
+        if context.Services.InventoryService ~= self or self.Departed[playerId] or not CanMutate(playerId) then
+            return nil, "inventory_unavailable"
+        end
+        if self.ChangeBatches[playerId] then return nil, "inventory_batch_busy" end
+        local data = EnsurePlayer(playerId)
+        local batch = { data = data, session = self.SessionIds[playerId] }
+        self.ChangeBatches[playerId] = batch
+        return function()
+            if self.ChangeBatches[playerId] ~= batch then return 0 end
+            self.ChangeBatches[playerId] = nil
+            if context.Services.InventoryService ~= self or self.Departed[playerId]
+                or self.Players[playerId] ~= data or self.SessionIds[playerId] ~= batch.session then return 0 end
+            if not batch.changed then return 0 end
+            PublishChanged(playerId, batch.reason)
+            return 1
+        end
     end
 
     function runtime:GetSessionGeneration(playerId)
@@ -252,6 +282,7 @@ function InventoryService:Start(context)
     -- 仅接收产蛋服务的权威记录；成熟、归属、幂等与场景移除由收取事务负责。
     -- 保留场景身份与已结算价值，每枚生成独立库存身份，不按类型堆叠。
     function runtime:AddEgg(playerId, eggRecord)
+
         if not CanMutate(playerId) then return nil, "persistence_not_ready" end
         if context.Services.InventoryService ~= self then
             return nil, "inventory_unavailable"
@@ -283,6 +314,7 @@ function InventoryService:Start(context)
             local ok, reason = self:CheckCapacity(playerId, "Egg", 0, 1)
             if not ok then return nil, reason end
         end
+
         local data = EnsurePlayer(playerId)
         self.GlobalSequence = self.GlobalSequence + 1
         local itemId = "egg:" .. string.format("%.0f", playerId) .. ":" .. string.format("%.0f", self.GlobalSequence)
@@ -302,6 +334,7 @@ function InventoryService:Start(context)
         }
         data.Eggs[itemId] = item
         data.EggOrder[#data.EggOrder + 1] = itemId
+
         PublishChanged(playerId, "add_egg")
         return CopyItem(item)
     end
@@ -423,6 +456,7 @@ function InventoryService:Start(context)
     function runtime:ClearPlayer(playerId, reason)
         local persistence = context.Services.PersistenceService
         if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(playerId) end
+        self.ChangeBatches[playerId] = nil
         self.SessionIds[playerId] = nil
         self.Departed[playerId], self.Restored[playerId] = true, nil
         self.Players[playerId] = nil
@@ -465,6 +499,7 @@ function InventoryService:Stop(context)
     if runtime.PreleaveCallback then
         System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.PreleaveCallback)
     end
+    runtime.ChangeBatches = {}
     runtime.Players = {}
     runtime.SessionIds = {}
     System:UnregisterEvent(Events.ON_PLAYER_ENTER, runtime.EnterCallback)

@@ -161,6 +161,23 @@ function TheftService:Start(context)
         PreleaveCallback = nil,
     }
 
+    -- 临时生成诊断：只使用已有状态；日志失败不改变生成流程。
+    local function GenerationTrace(stage, regionId, generation, spawnPointId, ...)
+        local args = { n = select("#", ...), ... }
+        pcall(function()
+            local fields = { "[TheftGenerationDiag]", "stage:", tostring(stage),
+                "regionId:", tostring(regionId), "generation:", tostring(generation),
+                "spawnPointId:", tostring(spawnPointId),
+                "moduleCurrent:", tostring(context.Services.TheftService == runtime),
+                "Stopped:", tostring(runtime.Stopped), "currentGeneration:", tostring(runtime.Generation),
+                "Generating:", tostring(runtime.Generating), "RefreshRoots:", tostring(runtime.RefreshRoots),
+                "Ready:", tostring(runtime.Ready), "Refreshing:", tostring(runtime.Refreshing) }
+            for index = 1, args.n do fields[#fields + 1] = tostring(args[index]) end
+            Log:PrintServerLog(table.concat(fields, " "))
+        end)
+    end
+    GenerationTrace("start_enter", nil, runtime.Generation, nil, "side:", context.Side)
+
     local function SendResult(playerId, rootId, success, reason, operation, carryRetained)
         local chicken = runtime.ChickensByRoot[rootId]
         System:SendToClient(playerId, context.NetMsg.Messages.PickupResult, {
@@ -236,24 +253,34 @@ function TheftService:Start(context)
     end
 
     local function RegisterSpawnedChicken(region, spawnPointId, chickenType, result, generation)
+        GenerationTrace("register_enter", region.RegionId, generation, spawnPointId,
+            "chickenType:", chickenType, "rootId:", type(result) == "table" and result.rootId or nil)
         if runtime.Stopped or context.Services.TheftService ~= runtime
             or runtime.Generation ~= generation then
+            GenerationTrace("register_stale", region.RegionId, generation, spawnPointId,
+                "rootId:", type(result) == "table" and result.rootId or nil,
+                "reason:", runtime.Stopped and "stopped" or context.Services.TheftService ~= runtime and "module_changed" or "generation_changed")
             if result.success then context.ElementCopy:DestroyTree(result.rootId) end
             return
         end
         if not result.success then
+            GenerationTrace("copy_failed", region.RegionId, generation, spawnPointId, "reason:", result.reason)
             error("正式鸡复制失败，regionId=" .. tostring(region.RegionId)
                 .. " spawnPointId=" .. tostring(spawnPointId)
                 .. " reason=" .. tostring(result.reason))
         end
         local chickenConfig = GameConfig.ChickenTypes[chickenType]
         local ok, purpose = ReadPurpose(result.rootId)
+        GenerationTrace("register_purpose", region.RegionId, generation, spawnPointId,
+            "rootId:", result.rootId, "readOk:", ok, "actual:", purpose,
+            "expected:", chickenConfig.RequiredPurpose, "matches:", ok and purpose == chickenConfig.RequiredPurpose)
         if not ok or purpose ~= chickenConfig.RequiredPurpose then
             error("复制鸡根作用属性不匹配，rootId=" .. tostring(result.rootId)
                 .. " actual=" .. tostring(purpose))
         end
         local spawnPosition = Element:GetPosition(spawnPointId)
         if not spawnPosition then
+            GenerationTrace("register_position_failed", region.RegionId, generation, spawnPointId, "rootId:", result.rootId)
             error("无法读取生成点位置，spawnPointId=" .. tostring(spawnPointId))
         end
         runtime.ChickensByRoot[result.rootId] = {
@@ -271,7 +298,12 @@ function TheftService:Start(context)
     end
 
     local function SpawnRegion(region, generation, onComplete)
+        GenerationTrace("region_start", region.RegionId, generation, nil, "regionRootId:", region.RegionRootId,
+            "requiredCount:", region.SpawnPointCount)
         local allSpawnPoints = FindSpawnPoints(region)
+        GenerationTrace("points_scanned", region.RegionId, generation, nil,
+            "count:", #allSpawnPoints, "requiredCount:", region.SpawnPointCount)
+        for _, pointId in ipairs(allSpawnPoints) do GenerationTrace("point_found", region.RegionId, generation, pointId) end
         if #allSpawnPoints < region.SpawnPointCount then
             error("启用区域的鸡生成点少于配置数量，regionId=" .. tostring(region.RegionId)
                 .. " required=" .. tostring(region.SpawnPointCount)
@@ -281,19 +313,29 @@ function TheftService:Start(context)
         local registeredCount = 0
         for _, spawnPointId in ipairs(spawnPoints) do
             if runtime.Stopped or context.Services.TheftService ~= runtime
-                or runtime.Generation ~= generation then return end
+                or runtime.Generation ~= generation then
+                GenerationTrace("spawn_stale", region.RegionId, generation, spawnPointId)
+                return end
             local currentSpawnPointId = spawnPointId
+            GenerationTrace("point_selected", region.RegionId, generation, currentSpawnPointId)
             local position = Element:GetPosition(currentSpawnPointId)
             if not position then
                 error("无法读取鸡生成点位置，spawnPointId=" .. tostring(currentSpawnPointId))
             end
             local currentChickenType = ChooseChickenType(region.ChickenPool)
             local chickenConfig = GameConfig.ChickenTypes[currentChickenType]
+            GenerationTrace("copy_request", region.RegionId, generation, currentSpawnPointId,
+                "chickenType:", currentChickenType, "templateRootId:", chickenConfig.TemplateRootId)
             context.ElementCopy:CopyTree(
                 chickenConfig.TemplateRootId,
                 CopyPosition(position),
                 "区域" .. tostring(region.RegionId) .. "生成点" .. tostring(currentSpawnPointId) .. "鸡",
                 function(result)
+                    GenerationTrace("copy_callback", region.RegionId, generation, currentSpawnPointId,
+                        "chickenType:", currentChickenType, "resultType:", type(result),
+                        "success:", type(result) == "table" and result.success,
+                        "rootId:", type(result) == "table" and result.rootId,
+                        "reason:", type(result) == "table" and result.reason)
                     local ok, errorMessage = xpcall(function()
                         local registered = RegisterSpawnedChicken(
                             region,
@@ -304,10 +346,15 @@ function TheftService:Start(context)
                         )
                         if not registered then return end
                         registeredCount = registeredCount + 1
+                        GenerationTrace("registered", region.RegionId, generation, currentSpawnPointId,
+                            "rootId:", result.rootId, "count:", registeredCount, "requiredCount:", region.SpawnPointCount)
                         if registeredCount == region.SpawnPointCount then
+                            GenerationTrace("region_completed", region.RegionId, generation, currentSpawnPointId, "count:", registeredCount)
                             onComplete()
                         end
                     end, Traceback)
+                    if not ok then GenerationTrace("register_callback_error", region.RegionId, generation, currentSpawnPointId,
+                        "error:", errorMessage) end
                     if not ok and not runtime.Stopped
                         and context.Services.TheftService == runtime
                         and runtime.Generation == generation then
@@ -315,6 +362,9 @@ function TheftService:Start(context)
                     end
                 end
             )
+            GenerationTrace("copy_request_returned", region.RegionId, generation, currentSpawnPointId,
+                "chickenType:", currentChickenType, "templateRootId:", chickenConfig.TemplateRootId,
+                "meaning:", "call_returned_not_spawn_confirmed")
         end
     end
 
@@ -769,6 +819,7 @@ function TheftService:Start(context)
     runtime.CarrySnapshotCallback = ProtectCallback("携带快照回调失败", runtime.CarrySnapshotCallback)
 
     context.Services.TheftService = runtime
+    GenerationTrace("runtime_registered", nil, runtime.Generation, nil)
     if config.InteractionEnabled then
         context.Events:Subscribe(TheftService.Name, "ZoneChanged", function(snapshot)
             if snapshot.inStolenArea == false and not runtime.Refreshing then
@@ -861,8 +912,12 @@ function TheftService:Start(context)
     end
 
     function runtime:GenerateRegions()
+        GenerationTrace("generate_enter", nil, self.Generation, nil)
         if self.Stopped or context.Services.TheftService ~= self
             or self.Generating or self.RefreshRoots then
+            GenerationTrace("generate_rejected", nil, self.Generation, nil,
+                "reason:", self.Stopped and "stopped" or context.Services.TheftService ~= self and "module_changed"
+                    or self.Generating and "already_generating" or "refresh_roots_pending")
             error("偷鸡生成入口已失效")
         end
         self.Generation = self.Generation + 1
@@ -877,7 +932,9 @@ function TheftService:Start(context)
                 and self.Generation == generation
         end
         local function SpawnNextRegion()
-            if not IsCurrent() then return end
+            if not IsCurrent() then
+                GenerationTrace("next_region_stale", nil, generation, nil, "nextRegionIndex:", nextRegionIndex)
+                return end
             while nextRegionIndex <= #GameConfig.Regions
                 and not GameConfig.Regions[nextRegionIndex].Enabled do
                 nextRegionIndex = nextRegionIndex + 1
@@ -886,6 +943,7 @@ function TheftService:Start(context)
             if not region then
                 self.Ready = true
                 self.Generating = false
+                GenerationTrace("all_regions_completed", nil, generation, nil, "completedRegionCount:", completedRegionCount)
                 Log:PrintServerLog("[TheftService] 正式偷鸡模块已就绪",
                     "enabledRegionCount:", completedRegionCount,
                     "interactionEnabled:", config.InteractionEnabled)
@@ -894,7 +952,9 @@ function TheftService:Start(context)
             end
             nextRegionIndex = nextRegionIndex + 1
             SpawnRegion(region, generation, function()
-                if not IsCurrent() then return end
+                if not IsCurrent() then
+                    GenerationTrace("region_completion_stale", region.RegionId, generation, nil)
+                    return end
                 completedRegionCount = completedRegionCount + 1
                 while nextRegionIndex <= #GameConfig.Regions
                     and not GameConfig.Regions[nextRegionIndex].Enabled do
@@ -911,10 +971,17 @@ function TheftService:Start(context)
         SpawnNextRegion()
         return generation
     end
+    GenerationTrace("startup_timer_schedule", nil, runtime.Generation, nil,
+        "delaySeconds:", GameConfig.Runtime.ServerReadyDelaySeconds)
     context.Timers:AddTimer(TheftService.Name,
         GameConfig.Runtime.ServerReadyDelaySeconds, function()
-            if runtime.Stopped or context.Services.TheftService ~= runtime then return end
-            if runtime.Generation == 0 then runtime:GenerateRegions() end
+            GenerationTrace("startup_timer_fired", nil, runtime.Generation, nil)
+            if runtime.Stopped or context.Services.TheftService ~= runtime then
+                GenerationTrace("startup_timer_rejected", nil, runtime.Generation, nil,
+                    "reason:", runtime.Stopped and "stopped" or "module_changed")
+                return end
+            if runtime.Generation == 0 then runtime:GenerateRegions()
+            else GenerationTrace("startup_generation_skipped", nil, runtime.Generation, nil, "reason:", "generation_already_started") end
         end)
 
 end

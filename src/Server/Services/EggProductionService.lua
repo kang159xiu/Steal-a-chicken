@@ -55,6 +55,22 @@ function EggProductionService:Start(context)
         if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(id) end
     end
     local function Now() return MiscService:GetServerTimestamp() end
+    -- 缩放只由服务端写入；操作记录不进入蛋快照或存档。
+    local growthOperations = {}
+    local function GrowthError(egg, stage, message)
+        Log:PrintError("[EggProduction] 成长缩放失败，不自动重试", "eggId:", egg.eggId,
+            "rootId:", egg.rootId, "stage:", stage, "error:", tostring(message))
+    end
+    local function StopGrowth(egg)
+        local operation = growthOperations[egg.eggId]
+        if not operation or operation.egg ~= egg then return end
+        growthOperations[egg.eggId] = nil -- 先失效等待中的两帧回调。
+        if operation.animating then
+            operation.animating = false
+            local ok, err = pcall(function() Element:StopScaleTo(egg.rootId) end)
+            if not ok then GrowthError(egg, "StopScaleTo_cleanup", err) end
+        end
+    end
     local function GrowthState(egg)
         return { eggId = egg.eggId, homeId = egg.homeId, rootId = egg.rootId,
             baseSellPrice = egg.baseSellPrice, finalScaleUnits = egg.finalScaleUnits,
@@ -62,6 +78,7 @@ function EggProductionService:Start(context)
             spawnedAtMs = egg.spawnedAtMs, hatchDeadlineMs = egg.hatchDeadlineMs, version = egg.version }
     end
     local function RemoveGrowth(egg)
+        StopGrowth(egg)
         runtime.GrowthVersion = runtime.GrowthVersion + 1
         System:SendToAllClients(context.NetMsg.Messages.EggGrowthRemoved, {
             eggId = egg.eggId, homeId = egg.homeId, rootId = egg.rootId, version = runtime.GrowthVersion,
@@ -73,6 +90,54 @@ function EggProductionService:Start(context)
         return not runtime.Stopped and context.Services.EggProductionService == runtime
             and runtime.Homes[house.homeId] == house and home:IsOwner(house.playerId, house.homeId)
     end
+    local function FinishGrowth(egg, operation)
+        if operation.failed or operation.finalized then return end
+        if operation.animating then
+            local ok, err = pcall(function() Element:StopScaleTo(egg.rootId) end)
+            if not ok then
+                operation.failed = true
+                GrowthError(egg, "StopScaleTo_mature", err)
+                return
+            end
+            operation.animating = false
+        end
+        local ok, err = pcall(function()
+            Element:SetScale(egg.rootId, Engine.Vector(egg.finalScale, egg.finalScale, egg.finalScale))
+        end)
+        operation.finalized = true
+        if not ok then operation.failed = true; GrowthError(egg, "SetScale_mature", err) end
+    end
+    local function MarkMature(egg)
+        local operation = growthOperations[egg.eggId]
+        -- 零孵化时间也先等待副本落地，再定型及发布成熟通知。
+        if egg.mature or not operation or not operation.landed then return end
+        FinishGrowth(egg, operation)
+        egg.mature = true
+        context.Events:Publish("EggHatched", Copy(egg))
+    end
+    local function QueueGrowth(house, egg)
+        local operation = { egg = egg, rootId = egg.rootId, version = egg.version }
+        growthOperations[egg.eggId] = operation
+        context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+            if not Current(house) or house.eggs[egg.eggId] ~= egg
+                or growthOperations[egg.eggId] ~= operation
+                or egg.rootId ~= operation.rootId or egg.version ~= operation.version then return end
+            operation.landed = true
+            local now = Now()
+            local duration = egg.hatchDeadlineMs - egg.spawnedAtMs
+            local remaining = egg.hatchDeadlineMs - now
+            if duration <= 0 or remaining <= 0 then MarkMature(egg); return end
+            local elapsed = math.max(0, math.min(duration, now - egg.spawnedAtMs))
+            local initial = GameConfig.EggGrowth.InitialScaleUnits
+            local current = (initial + (egg.finalScaleUnits - initial) * elapsed / duration) / 100
+            local ok, err = pcall(function()
+                Element:ScaleTo(egg.rootId, Engine.Vector(egg.finalScale, egg.finalScale, egg.finalScale),
+                    remaining / 1000, Element.CURVE.linear, Engine.Vector(current, current, current))
+            end)
+            if ok then operation.animating = true
+            else operation.failed = true; GrowthError(egg, "ScaleTo", err) end
+        end)
+    end
     local function Destroy(rootId, reason)
         local ok, result = pcall(function() return context.ElementCopy:DestroyTree(rootId) end)
         if not ok or result ~= true then
@@ -82,6 +147,7 @@ function EggProductionService:Start(context)
     end
     local function SendCount(house)
         if not Current(house) then return end
+        if house.countBatch then house.countBatch.changed = true; return end
         local resources = home:GetEggResources(house.homeId) or {}
         local previous = runtime.LastStateByHome[house.homeId]
         local state = { homeId = house.homeId, playerId = house.playerId,
@@ -90,6 +156,20 @@ function EggProductionService:Start(context)
             eggCount = house.count, eggCapacity = Capacity(house.playerId), version = previous and previous.version + 1 or 1 }
         runtime.LastStateByHome[house.homeId] = state
         System:SendToAllClients(context.NetMsg.Messages.HomeCountState, Copy(state))
+    end
+    function runtime:BeginCountBatch(playerId, homeId)
+        local house = self.Homes[homeId]
+        if not house or not Current(house) or house.playerId ~= playerId then return nil, "stale_home" end
+        if house.countBatch then return nil, "count_batch_busy" end
+        local batch = {}
+        house.countBatch = batch
+        return function()
+            if house.countBatch ~= batch then return 0 end
+            house.countBatch = nil
+            if not Current(house) or not batch.changed then return 0 end
+            SendCount(house)
+            return 1
+        end
     end
     -- 先结算旧占用条件下的时间；满容量和复制中的鸡不扣生产剩余时间。
     local function Advance(house, now)
@@ -104,8 +184,7 @@ function EggProductionService:Start(context)
         end
         for _, egg in pairs(house.eggs) do
             if not egg.mature and now >= egg.hatchDeadlineMs then
-                egg.mature = true
-                context.Events:Publish("EggHatched", Copy(egg))
+                MarkMature(egg)
             end
         end
     end
@@ -217,6 +296,7 @@ function EggProductionService:Start(context)
                 mature = false, baseSellPrice = baseSellPrice, finalScaleUnits = finalScaleUnits,
                 finalScale = finalScaleUnits / 100, finalSellPrice = finalSellPrice, version = runtime.GrowthVersion }
             house.eggs[egg.eggId] = egg
+            QueueGrowth(house, egg)
             house.count = house.count + 1
             chicken.remainingMs = chicken.config.ProductionIntervalSeconds * 1000
             if persistence then persistence:MarkDirty(house.playerId, "production_cycle_completed") end
@@ -267,13 +347,17 @@ function EggProductionService:Start(context)
             return nil, "inventory_unavailable"
         end
         egg.collecting = true -- 在成熟事件及库存事件发布前封锁同蛋重入。
+
         Advance(house, now) -- 按释放前占用结算冻结时间，腾位后仅续计。
+
         if not Current(house) or house.eggs[eggId] ~= egg then return nil, "egg_not_found" end
+
         local ok, item, reason = pcall(function()
             return inventory:AddEgg(playerId, { eggId = egg.eggId, eggTypeId = egg.eggTypeId,
                 baseSellPrice = egg.baseSellPrice, finalScaleUnits = egg.finalScaleUnits,
                 finalScale = egg.finalScale, finalSellPrice = egg.finalSellPrice })
         end)
+
         if not ok then
             -- 未知异常可能已写库存，保留源蛋并封锁再领，不猜测回滚。
             Log:PrintError("[EggCollection] 入库调用异常，保留源蛋并封锁重复领取", "eggId:", eggId,
@@ -284,8 +368,11 @@ function EggProductionService:Start(context)
         if house.eggs[eggId] == egg then
             house.eggs[eggId] = nil
             house.count = house.count - 1
+
             RemoveGrowth(egg)
+
             SendCount(house)
+
             Destroy(egg.rootId, "egg_collected")
         end
         return item, "collected"

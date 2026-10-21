@@ -22,11 +22,6 @@ end
 function PersistenceService:Start(context)
     if context.Side ~= "Server" then return end
     local c = Config.Persistence
-    -- 临时存档诊断：记录入口/失败及测试目录、首段有限预览，不输出完整快照。
-    Log:PrintServerLog("[PersistenceDiag] Start", "ProbeEnabled:", tostring(c.ProbeEnabled),
-        "ProductionEnabled:", tostring(c.ProductionEnabled), "ProbeMode:", tostring(c.ProbeMode),
-        "ProbePrefix:", tostring(c.ProbePrefix), "ProductionPrefix:", tostring(c.ProductionPrefix),
-        "trigger:", "HomeTeleportCalled", "settleFrames:", "2", "readbackAfterProbeSeconds:", "1")
     local function Failure(operation, playerId, generation, trace, err)
         Log:PrintServerLog("[PersistenceDiag] failure", "operation:", tostring(operation),
             "playerId:", tostring(playerId), "generation:", tostring(generation), "stage:", tostring(trace.stage),
@@ -53,8 +48,6 @@ function PersistenceService:Start(context)
         runtime.NextGeneration = runtime.NextGeneration + 1
         runtime.Sessions[playerId] = { generation = runtime.NextGeneration, prefix = prefix, probe = probe == true, separator = "",
             segmentCount = probe == true and c.ProbeSegmentCount or c.SegmentCount }
-        Log:PrintServerLog("[PersistenceDiag] Begin success", "playerId:", tostring(playerId),
-            "idType:", type(playerId), "generation:", tostring(runtime.NextGeneration), "prefix:", tostring(prefix))
         return runtime.NextGeneration
     end
     function runtime:BeginSession(playerId, archiveReady)
@@ -174,44 +167,23 @@ function PersistenceService:Start(context)
             error(err, 0)
         end
     end
-    -- 临时加载诊断；日志失败不改变原校验结果，不输出资产正文。
-    local function ChecksumDiag(trace, ...)
-        if trace.context ~= "normal_read" then return end
-        local args = { n = select("#", ...), ... }
-        pcall(function()
-            Log:PrintServerLog("[PersistenceChecksumDiag]", (table.unpack or unpack)(args, 1, args.n))
-        end)
-    end
     local function ReadCommitted(playerId, generation, trace)
         trace.stage = "read_committed_session"
         local validateIntegrity = c.ValidateReadIntegrity ~= false
         local session = Session(playerId, generation)
         local directory = ReadValue(playerId, generation, Key(session, "DIR"), trace)
         if not directory then return nil, "not_found" end
-        ChecksumDiag(trace, "stage:", "directory", "playerId:", tostring(playerId), "generation:", tostring(generation),
-            "directoryKey:", Key(session, "DIR"), "directoryValue:", directory)
         trace.stage = "directory_validate"
         local group, rev, count, length, hash = directory:match("^D1|([AB])|([1-9][0-9]*)|([1-9][0-9]*)|([1-9][0-9]*)|([0-9A-F]+)$")
         assert(group and #rev <= 16 and #count <= 2 and #length <= 6 and #hash == 8, "directory_corrupt")
         rev, count, length = tonumber(rev), tonumber(count), tonumber(length)
         assert(Integer(rev) and count <= session.segmentCount
             and (not validateIntegrity or length <= session.segmentCount * c.SegmentPayload), "directory_limit")
-        ChecksumDiag(trace, "stage:", "directory_parsed", "playerId:", tostring(playerId), "generation:", tostring(generation),
-            "group:", group, "revision:", rev, "segments:", count, "expectedLength:", length, "expectedChecksum:", hash,
-            "validateReadIntegrity:", validateIntegrity)
         local parts = {}
         for i = 1, count do
             local value = assert(ReadValue(playerId, generation, Key(session, group .. string.format("%02d", i)), trace), "segment_missing")
             trace.stage = "segment_validate"
             local batch, index, total, checksum, payload = value:match("^P1|([0-9]+)|([0-9]+)|([0-9]+)|([0-9A-F]+)|(.*)$")
-            local actualChecksum = payload and Codec.Checksum(payload)
-            ChecksumDiag(trace, "stage:", "segment", "playerId:", tostring(playerId), "generation:", tostring(generation),
-                "key:", Key(session, group .. string.format("%02d", i)), "group:", group, "revision:", rev,
-                "batch:", tostring(batch), "index:", tostring(index), "total:", tostring(total),
-                "payloadLength:", payload and #payload or "nil", "expectedChecksum:", tostring(checksum),
-                "actualChecksum:", tostring(actualChecksum), "checksumEqual:", payload ~= nil and actualChecksum == checksum,
-                "segmentValid:", batch == tostring(rev) and index == tostring(i) and total == tostring(count)
-                    and payload ~= nil and #payload <= c.SegmentPayload and actualChecksum == checksum)
             assert(payload ~= nil, "segment_header_invalid")
             if validateIntegrity then
                 assert(batch == tostring(rev) and index == tostring(i) and total == tostring(count)
@@ -221,10 +193,6 @@ function PersistenceService:Start(context)
         end
         local text = table.concat(parts)
         trace.stage, trace.value = "snapshot_validate", text
-        ChecksumDiag(trace, "stage:", "snapshot", "playerId:", tostring(playerId), "generation:", tostring(generation),
-            "directoryKey:", Key(session, "DIR"), "group:", group, "revision:", rev, "segments:", count,
-            "expectedLength:", length, "actualLength:", #text, "lengthEqual:", #text == length,
-            "expectedChecksum:", hash, "actualChecksum:", Codec.Checksum(text), "checksumEqual:", Codec.Checksum(text) == hash)
         if validateIntegrity then
             assert(#text == length and Codec.Checksum(text) == hash, "snapshot_checksum_mismatch")
         end
@@ -265,8 +233,6 @@ function PersistenceService:Start(context)
         local revision = meta and meta.revision + 1 or 1
         if not Integer(revision) then runtime.Busy[playerId] = nil; return false, "archive_revision_overflow" end
         local count = math.ceil(#text / c.SegmentPayload)
-        Log:PrintServerLog("[Persistence] write_start", "playerId:", playerId, "jsonLength:", #text,
-            "segments:", count, "group:", group, "revision:", revision, "snapshotVersion:", 1)
         local function CurrentJob()
             return Active() and runtime.Sessions[playerId] == session and runtime.Busy[playerId] == job
         end
@@ -336,7 +302,12 @@ function PersistenceService:Start(context)
     local function Status(record, state, reason)
         record.state, record.reason = state, reason
         SendStatus(record.playerId, state, reason, record.ready == true and not record.frozen)
-        Log:PrintServerLog("[Persistence] state", tostring(record.playerId), tostring(state), tostring(reason))
+        if state:find("failed", 1, true) then
+            Log:PrintServerLog("[Persistence] state", tostring(record.playerId), tostring(state), tostring(reason))
+        elseif state == "ready" and (reason == "restored" or reason == "new_player") then
+            Log:PrintServerLog("[Persistence] load_result", "playerId:", record.playerId,
+                "success:", true, "reason:", reason)
+        end
         context.Events:Publish("PersistenceStateChanged", { playerId = record.playerId, state = state,
             reason = tostring(reason), ready = record.ready == true and not record.frozen, generation = record.generation })
     end
@@ -549,7 +520,9 @@ function PersistenceService:Start(context)
     end
     if c.ProductionEnabled then
         for _, eventName in ipairs({ "InventoryChanged", "EconomyChanged" }) do
-            context.Events:Subscribe(self.Name, eventName, function(event) runtime:MarkDirty(event.playerId, eventName) end)
+            context.Events:Subscribe(self.Name, eventName, function(event)
+                runtime:MarkDirty(event.playerId, eventName)
+            end)
         end
         context.Timers:AddTimer(self.Name, Config.Runtime.ServerReadyDelaySeconds, function() if Active() then startupReady = true end end)
         context.Events:Subscribe(self.Name, "HomeTeleportCalled", function(event)

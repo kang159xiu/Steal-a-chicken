@@ -149,23 +149,30 @@ function EggCollectionListController:Start(context)
     end)
     local function ResetRows()
         runtime.RenderVersion = runtime.RenderVersion + 1
+        runtime.Refreshing = false
         runtime.Rows, runtime.ByItem, runtime.ProgressRows, runtime.PriceRows, runtime.Pending = {}, {}, {}, {}, {}
         if runtime.Ready then UI:ClearListView(config.TileViewId) end
     end
     local function Render()
         if not runtime.Ready or not runtime.Snapshot then
             return end
+
         UI:SetText({ config.CountTextId }, tostring(runtime.Snapshot.eggCount) .. "/"
             .. tostring(runtime.Snapshot.eggCapacity), false)
-        runtime.RenderVersion = runtime.RenderVersion + 1
-        local renderVersion = runtime.RenderVersion
-        runtime.Refreshing = true
+        local changed = false
+        local function Changing()
+            if changed then return end
+            changed = true
+            runtime.RenderVersion = runtime.RenderVersion + 1
+            runtime.Refreshing = true
+        end
         local present = {}
         for _, egg in ipairs(runtime.Snapshot.eggs) do present[egg.eggId] = true end
         for eggId, row in pairs(runtime.Rows) do
             if not present[eggId] then
                 runtime.Rows[eggId], runtime.ByItem[row.itemId], runtime.ProgressRows[eggId] = nil, nil, nil
                 runtime.PriceRows[eggId] = nil
+                Changing()
                 UI:RemoveListViewItem(config.TileViewId, row.itemId)
             end
         end
@@ -189,6 +196,7 @@ function EggCollectionListController:Start(context)
                 local data = { eggId = egg.eggId, chickenTypeId = egg.chickenTypeId, spawnedAtMs = egg.spawnedAtMs,
                     hatchDeadlineMs = egg.hatchDeadlineMs, mature = egg.mature, imageId = image, rowVersion = row.version,
                     baseSellPrice = egg.baseSellPrice, finalScaleUnits = egg.finalScaleUnits, finalSellPrice = egg.finalSellPrice }
+                Changing()
                 row.data, row.landed = data, false
                 if row.itemId then
                     UI:UpdateListViewItem(config.TileViewId, row.itemId, data)
@@ -199,30 +207,31 @@ function EggCollectionListController:Start(context)
                 end
             end
         end
+        local renderVersion = runtime.RenderVersion
+
+        if not changed then return end
         context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, Protect(function()
-            if runtime.RenderVersion ~= renderVersion then
-                return end
+            if runtime.RenderVersion ~= renderVersion then return end
             UI:ClearListViewSelection(config.TileViewId)
             runtime.Refreshing = false
         end))
     end
     local function Request(action, eggId)
-        if not runtime.Ready or runtime.Refreshing or not runtime.HomeId then
-            return end
+        if not runtime.Ready or runtime.Refreshing or not runtime.HomeId then return end
         runtime.RequestId = runtime.RequestId + 1
         local request = { homeId = runtime.HomeId, homeVersion = runtime.HomeVersion,
             action = action, eggId = eggId, requestId = runtime.RequestId }
         runtime.Pending[request.requestId] = request
+
         System:SendToServer(messages.EggCollectionListAction, request)
     end
     runtime.SelectionCallback = Protect(function(listId, itemId, data, selected)
         if selected ~= true then
             return end
-        if listId ~= config.TileViewId or not runtime.Ready or runtime.Refreshing or type(data) ~= "table" then
-            return end
+
+        if listId ~= config.TileViewId or not runtime.Ready or runtime.Refreshing or type(data) ~= "table" then return end
         local row = runtime.ByItem[itemId]
-        if not row or not Current(row) or not row.landed or row.data.eggId ~= data.eggId or row.version ~= data.rowVersion then
-            return end
+        if not row or not Current(row) or not row.landed or row.data.eggId ~= data.eggId or row.version ~= data.rowVersion then return end
         local version, eggId = row.version, row.data.eggId
         UI:ClearListViewSelection(listId)
         if Current(row) and row.version == version then Request("single", eggId)
@@ -253,11 +262,12 @@ function EggCollectionListController:Start(context)
     end)
     runtime.ResultCallback = Protect(function(_, message)
         if type(message) ~= "table" then return end
+
         local request = runtime.Pending[message.requestId]
         if not request or request.homeId ~= message.homeId or request.homeVersion ~= message.homeVersion
             or request.action ~= message.action or request.eggId ~= message.eggId
-            or runtime.HomeVersion ~= message.homeVersion or type(message.success) ~= "boolean" then
-            return end
+            or runtime.HomeVersion ~= message.homeVersion or type(message.success) ~= "boolean" then return end
+
         runtime.Pending[message.requestId] = nil
         if not message.success then
             local full = message.reason == "inventory_capacity_full"

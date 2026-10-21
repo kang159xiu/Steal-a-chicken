@@ -55,6 +55,7 @@ function PlacementController:Start(context)
             })
             return false
         end
+
         Show(snapshot.canPlace and runtime.SelectedItemId ~= nil
             and runtime.SelectedItemId == snapshot.selectedItemId and not runtime.SelectionBusy,
             snapshot.canRecall)
@@ -122,7 +123,6 @@ function PlacementController:Start(context)
     end
     runtime.PlaceCallback = Protect(function() Submit("place") end)
     runtime.RecallCallback = Protect(function() Submit("recall") end)
-
     UI:SetVisibility({ config.UiGroupId }, false)
     UI:SetVisibility({ config.RecallUiGroupId }, false)
     UI:RegisterClicked(config.PlaceButtonId, runtime.PlaceCallback)
@@ -131,9 +131,6 @@ function PlacementController:Start(context)
     System:BindNotify(context.NetMsg.Messages.PlacementResult, runtime.ResultCallback)
     -- 仅缓存服务端选择快照；注销时保留 HotbarController 的同消息监听。
     System:BindNotify(context.NetMsg.Messages.HotbarSelectionState, runtime.SelectionCallback)
-    Log:PrintLog("[PlacementController] 已注册", "placeButton:", config.PlaceButtonId,
-        "recallButton:", config.RecallButtonId, "placeGroup:", config.UiGroupId,
-        "recallGroup:", config.RecallUiGroupId, "maxDistance:", config.MaxDistance)
     context.Timers:AddTimer(PlacementController.Name, GameConfig.Runtime.ServerReadyDelaySeconds, function()
         if not Active() then return end
         runtime.Ready = true

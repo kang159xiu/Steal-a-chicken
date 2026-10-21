@@ -5,8 +5,6 @@ local PlacementService = {
     FeatureFlag = "Placement",
     Dependencies = { "HomeService", "InventoryService", "HotbarService", "HomeUpgradeService" },
 }
-
-
 local function IsPositiveInteger(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
 end
@@ -156,6 +154,7 @@ function PlacementService:Start(context)
             canRecall = target ~= nil and Occupant(target) ~= nil,
             busy = target ~= nil and target.operation ~= nil,
         }
+
         System:SendToClient(playerId, context.NetMsg.Messages.PlacementState, message)
     end
 
@@ -273,7 +272,9 @@ function PlacementService:Start(context)
 
     local function Protect(callback)
         return function(...)
-            if not Active() then return end
+            if not Active() then
+                return
+            end
             local args = { n = select("#", ...), ... }
             local ok, message = xpcall(function()
                 callback((table.unpack or unpack)(args, 1, args.n))
@@ -290,6 +291,7 @@ function PlacementService:Start(context)
             return
         end
         local slot = home:GetPlacementSlot(playerId, elementId)
+
         if not slot then
             return
         end
@@ -308,8 +310,11 @@ function PlacementService:Start(context)
             house = { playerId = playerId, slots = {}, count = 0 }
             runtime.Homes[slot.homeId] = house
         end
-        if house.playerId ~= playerId then error("放置家园归属记录不一致") end
+        if house.playerId ~= playerId then
+            error("放置家园归属记录不一致")
+        end
         local item = SelectedChicken(playerId)
+
         runtime.Targets[playerId] = { playerId = playerId, homeId = slot.homeId,
             slotIndex = slot.slotIndex, elementId = elementId, version = NextVersion(),
             selectedItemId = item and item.itemId or nil }
@@ -567,9 +572,6 @@ function PlacementService:Start(context)
             runtime.Ready = true
         end
     end)
-    Log:PrintServerLog("[PlacementService] 已注册", "event:", Events.ON_ELEMENT_TOUCH_PLAYER,
-        "placeGroup:", GameConfig.Placement.UiGroupId, "recallGroup:", GameConfig.Placement.RecallUiGroupId,
-        "maxDistance:", GameConfig.Placement.MaxDistance, "delaySeconds:", GameConfig.Runtime.ServerReadyDelaySeconds)
     context.Timers:AddLoopFrame(PlacementService.Name, 1, Protect(function()
         if not runtime.Ready or runtime.Committing then return end
         local playerIds = {}

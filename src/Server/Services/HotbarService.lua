@@ -160,22 +160,26 @@ function HotbarService:Start(context)
 
     local function SpawnAndSelect(playerId, itemId)
         local state = EnsureState(playerId)
+
         local item = inventory:GetItem(playerId, itemId)
         if not item then
             state.busy = false
             SendSnapshot(playerId)
+
             return false, "item_not_found"
         end
         local templateRootId = ResolveTemplate(item)
         if not IsPositiveInteger(templateRootId) then
             state.busy = false
             SendSnapshot(playerId)
+
             return false, "item_template_not_configured"
         end
         local playerPosition = Character:GetPosition(playerId)
         if not playerPosition then
             state.busy = false
             SendSnapshot(playerId)
+
             return false, "player_position_unavailable"
         end
 
@@ -187,6 +191,7 @@ function HotbarService:Start(context)
             playerPosition.Y,
             playerPosition.Z + GameConfig.Hotbar.DisplayHeight
         )
+
         context.ElementCopy:CopyTree(
             templateRootId,
             targetPosition,
@@ -227,18 +232,22 @@ function HotbarService:Start(context)
                         DestroyRootNow(result.rootId, "selection_changed_before_bind")
                         return
                     end
+
                     Element:BindingToCharacterOrCreature(
                         result.rootId,
                         playerId,
                         GameConfig.Theft.CharacterSocket,
                         GameConfig.Theft.SocketMode
                     )
+
                     context.Timers:AddFrame(HotbarService.Name, delayFrames, function()
                         if state.operation ~= operation then
                             DestroyRootNow(result.rootId, "selection_changed_after_bind")
                             return
                         end
-                        if Element:GetAttachParentCharacter(result.rootId) ~= playerId then
+                        local attachedPlayerId = Element:GetAttachParentCharacter(result.rootId)
+
+                        if attachedPlayerId ~= playerId then
                             DestroyRootNow(result.rootId, "bind_verification_failed")
                             state.busy = false
                             SendSnapshot(playerId)
@@ -340,6 +349,7 @@ function HotbarService:Start(context)
             return
         end
         local success, reason = ToggleSelection(playerId, message.itemId)
+
         if not success then
             Log:PrintServerLog("[HotbarService] 快捷栏选择请求被拒绝",
                 "playerId:", playerId, "itemId:", message.itemId, "reason:", reason)

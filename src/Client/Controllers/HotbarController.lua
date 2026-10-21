@@ -44,14 +44,14 @@ function HotbarController:Start(context)
         ChickenImages = {},
         EggImages = {},
         Active = true,
-        Rendering = false,
+        Rows = {},
+        InputVersion = 0,
         RenderedItems = {},
         SnapshotCallback = nil,
         SelectionCallback = nil,
         ZoneCallback = nil,
         ItemSetCallback = nil,
         ItemSelectionCallback = nil,
-        RenderVersion = 0,
     }
     context.Services.HotbarController = runtime
 
@@ -84,72 +84,112 @@ function HotbarController:Start(context)
         return imageId
     end
 
-    local function SetItem(listViewId, itemId, itemData)
-        if listViewId ~= config.TileViewId or type(itemData) ~= "table"
-            or itemData.renderVersion ~= runtime.RenderVersion then return end
-        local imageUid = UI:GetListViewItemUID(listViewId, itemId, config.ItemImageId)
-        local quantityUid = UI:GetListViewItemUID(listViewId, itemId, config.QuantityTextId)
-        if not imageUid or imageUid == "" or not quantityUid or quantityUid == "" then
-            error("无法取得快捷栏瓦片子控件，itemId=" .. tostring(itemId))
-        end
+    local function Current(row)
+        return IsActive() and runtime.Ready and runtime.Rows[row.index] == row
+            and runtime.RenderedItems[row.itemId] == row
+    end
 
-        UI:SetImage({ imageUid }, itemData.imageId, true)
-        UI:SetText({ quantityUid }, config.QuantityPrefix .. tostring(itemData.count), false)
+    local function Border(row)
+        if not Current(row) or not row.landed then return end
+        local selected = row.data.itemId == runtime.SelectedItemId
+        if row.selected == selected then return end
+        local uid = UI:GetListViewItemUID(config.TileViewId, row.itemId, config.SelectedBorderId)
+        if not uid or uid == "" then error("无法取得快捷栏选中框UID") end
+        UI:SetVisibility({ uid }, selected)
+        row.selected = selected
+    end
+
+    local function UpdateBorders()
+        for _, row in ipairs(runtime.Rows) do Border(row) end
+    end
+
+    local function SetItem(listViewId, itemId, itemData)
+        if listViewId ~= config.TileViewId or type(itemData) ~= "table" then
+            return end
+        local row = runtime.Rows[itemData.position]
+
+        if not row or row.data.itemId ~= itemData.itemId or row.version ~= itemData.inputVersion
+            or (row.itemId ~= nil and (row.itemId ~= itemId or runtime.RenderedItems[itemId] ~= row))
+            or (runtime.RenderedItems[itemId] ~= nil and runtime.RenderedItems[itemId] ~= row) then
+            return end
+        row.itemId = itemId
+        runtime.RenderedItems[itemId] = row
+        row.binding = (row.binding or 0) + 1
+        local binding, version, businessItemId = row.binding, row.version, row.data.itemId
+        row.landed, row.selected = false, nil
+        context.Timers:AddFrame(HotbarController.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+            Run("快捷栏瓦片落地", function()
+                if not Current(row) or row.binding ~= binding or row.version ~= version
+                    or row.data.itemId ~= businessItemId then
+                    return end
+                local imageUid = UI:GetListViewItemUID(listViewId, itemId, config.ItemImageId)
+                local quantityUid = UI:GetListViewItemUID(listViewId, itemId, config.QuantityTextId)
+                if not imageUid or imageUid == "" or not quantityUid or quantityUid == "" then
+                    error("无法取得快捷栏瓦片子控件，itemId=" .. tostring(itemId))
+                end
+                -- 旧显示数据副本仍可装填同一输入身份；始终绘制最新快照。
+                UI:SetImage({ imageUid }, row.data.imageId, true)
+                UI:SetText({ quantityUid }, config.QuantityPrefix .. tostring(row.data.count), false)
+                row.landed = true
+
+                Border(row)
+                UI:ClearListViewSelection(config.TileViewId)
+            end)
+        end)
     end
 
     local function Render()
         if not IsActive() or not runtime.Ready then return end
-        runtime.RenderVersion = runtime.RenderVersion + 1
-        local renderVersion = runtime.RenderVersion
-        runtime.Rendering = true
-        runtime.RenderedItems = {}
-        UI:ClearListView(config.TileViewId)
         local records = {}
         for index, item in ipairs(runtime.Items) do
             if type(item) ~= "table" or type(item.itemId) ~= "string"
                 or (item.kind ~= "Chicken" and item.kind ~= "Egg")
-                or not IsPositiveInteger(item.count)
-                or not IsPositiveInteger(item.iconIndex) then
+                or not IsPositiveInteger(item.count) or not IsPositiveInteger(item.iconIndex) then
                 error("库存快照项目格式无效，index=" .. tostring(index))
             end
-            records[index] = {
-                itemId = item.itemId,
-                kind = item.kind,
-                count = item.count,
-                imageId = ResolveImage(item),
-                renderVersion = renderVersion,
-            }
+            records[index] = { itemId = item.itemId, kind = item.kind,
+                count = item.count, imageId = ResolveImage(item), position = index }
         end
-        local listItemIds = UI:InitListView(config.TileViewId, records) or {}
-        for index, listItemId in ipairs(listItemIds) do
-            runtime.RenderedItems[listItemId] = records[index].itemId
-        end
-        context.Timers:AddFrame(
-            HotbarController.Name,
-            GameConfig.Runtime.EngineOperationDelayFrames,
-            function()
-                if not IsActive() or runtime.RenderVersion ~= renderVersion then return end
-                for index, listItemId in ipairs(listItemIds) do
-                    local itemData = records[index]
-                    local borderUid = UI:GetListViewItemUID(
-                        config.TileViewId,
-                        listItemId,
-                        config.SelectedBorderId
-                    )
-                    if not borderUid then
-                        error("无法取得快捷栏选中框UID，itemIndex=" .. tostring(index))
-                    end
-                    UI:SetVisibility(
-                        { borderUid },
-                        itemData.itemId == runtime.SelectedItemId
-                    )
-                end
-                -- 等装填落地后复位原生选择，清理刷新期间的选择事件。
-                -- 业务选中框仍由服务端状态控制。
-                UI:ClearListViewSelection(config.TileViewId)
-                runtime.Rendering = false
+        -- Update后原生点击可能仍携带创建时的数据。物品身份变化时重建该位置及尾部，
+        -- 不把同一个物理列表项改绑给另一物品；保持鸡前蛋后与前部未变行。
+        local removeFrom = #records + 1
+        for index = 1, math.min(#runtime.Rows, #records) do
+            if runtime.Rows[index].data.itemId ~= records[index].itemId then
+                removeFrom = index
+                break
             end
-        )
+        end
+        for index = #runtime.Rows, removeFrom, -1 do
+            local row = runtime.Rows[index]
+            runtime.Rows[index], runtime.RenderedItems[row.itemId] = nil, nil
+
+            UI:RemoveListViewItem(config.TileViewId, row.itemId)
+        end
+        for index, data in ipairs(records) do
+            local row = runtime.Rows[index]
+            local prior = row and row.data
+            if not prior or prior.kind ~= data.kind
+                or prior.count ~= data.count or prior.imageId ~= data.imageId then
+                local listItemId = row and row.itemId
+                if not row then
+                    runtime.InputVersion = runtime.InputVersion + 1
+                    row = { index = index, version = runtime.InputVersion, itemId = listItemId }
+                    runtime.Rows[index] = row
+                end
+
+                data.inputVersion = row.version
+                row.binding = (row.binding or 0) + 1
+                row.data, row.landed = data, false
+                if listItemId then
+                    UI:UpdateListViewItem(config.TileViewId, listItemId, data)
+                else
+                    row.itemId = UI:AddListViewItem(config.TileViewId, data)
+                    if not row.itemId then error("添加快捷栏项未返回ID") end
+                    runtime.RenderedItems[row.itemId] = row
+                end
+            end
+        end
+        UpdateBorders()
         SetVisible(runtime.Visible)
     end
 
@@ -179,7 +219,7 @@ function HotbarController:Start(context)
             end
             runtime.SelectedItemId = message.selectedItemId
             runtime.Visible = message.visible
-            if runtime.Ready then SetVisible(runtime.Visible) end
+            if runtime.Ready then UpdateBorders(); SetVisible(runtime.Visible) end
         end)
     end
 
@@ -238,24 +278,31 @@ function HotbarController:Start(context)
                     or not runtime.ItemSelectionCallback then return end
                 Run("快捷栏瓦片点击", function()
                     if select ~= true then return end
+
                     if listViewId ~= config.TileViewId or not runtime.Ready
-                        or not runtime.Visible or runtime.Rendering then return end
-                    if type(itemData) ~= "table"
-                        or itemData.renderVersion ~= runtime.RenderVersion
-                        or type(itemData.itemId) ~= "string" or itemData.itemId == ""
-                        or runtime.RenderedItems[itemId] ~= itemData.itemId then
-                        return
-                    end
-                    local businessItemId = itemData.itemId
+                        or not runtime.Visible then
+                        return end
+                    if type(itemData) ~= "table" then
+                        return end
+                    local row = runtime.RenderedItems[itemId]
+                    if not row or not Current(row) or not row.landed
+                        or row.data.itemId ~= itemData.itemId or row.version ~= itemData.inputVersion
+                        or row.index ~= itemData.position then
+                        return end
+                    local businessItemId, version, binding = row.data.itemId, row.version, row.binding
                     -- 先复位输入状态；select=false 直接返回，不发送第二次请求。
                     UI:ClearListViewSelection(listViewId)
-                    if not IsActive() then return end
+                    if not Current(row) or not row.landed or row.version ~= version
+                        or row.binding ~= binding or row.data.itemId ~= businessItemId then
+                        return end
+
                     System:SendToServer(context.NetMsg.Messages.HotbarToggleSelection, {
                         itemId = businessItemId,
                     })
                 end)
             end
             UI:SetListViewItemSelectionChangeCall(config.TileViewId, runtime.ItemSelectionCallback)
+            UI:InitListView(config.TileViewId, {})
             runtime.Ready = true
             Render()
             System:SendToServer(context.NetMsg.Messages.InventorySnapshotRequest, {})
@@ -275,7 +322,7 @@ function HotbarController:Stop(context)
     -- 先失效运行实例和装填版本，阻断清理期间及迟到的回调。
     runtime.Active = false
     runtime.Ready = false
-    runtime.RenderVersion = runtime.RenderVersion + 1
+    runtime.Rows = {}
     runtime.RenderedItems = {}
     runtime.ItemSelectionCallback = nil
     runtime.ItemSetCallback = nil
@@ -292,6 +339,7 @@ function HotbarController:Stop(context)
     if runtime.ZoneCallback then
         System:UnbindNotify(context.NetMsg.Messages.ZoneState, runtime.ZoneCallback)
     end
+    context.Timers:RemoveOwner(HotbarController.Name)
     context.Services.HotbarController = nil
 end
 

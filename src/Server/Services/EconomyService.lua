@@ -66,6 +66,20 @@ function EconomyService:Start(context)
             return true
         end
     end
+    function runtime:BeginSaleBatch(playerId, generation)
+        if not self:IsCurrent(playerId, generation) or not CanMutate(playerId) then return nil, "session_unavailable" end
+        local session = self.Sessions[playerId]
+        if session.saleBatch then return nil, "sale_batch_busy" end
+        local batch = {}
+        session.saleBatch = batch
+        return function()
+            if session.saleBatch ~= batch then return 0 end
+            session.saleBatch = nil
+            if not self:IsCurrent(playerId, generation) or self.Sessions[playerId] ~= session or not batch.changed then return 0 end
+            context.Events:Publish("EconomyChanged", { playerId = playerId, sessionGeneration = generation, balance = session.balance })
+            return 1
+        end
+    end
     -- 金额由SellShop从权威物品读取；出售入账和升级扣款均由本模块修改余额。
     -- 扣库存和加钱之间没有事件、引擎调用或等待；发布通知时两者已提交。
     function runtime:SettleSale(playerId, generation, inventory, itemId, amount)
@@ -82,10 +96,11 @@ function EconomyService:Start(context)
         local removed, publish = inventory:RemoveItem(playerId, itemId, "sell_item", true)
         if not removed then return false, publish end
         session.balance = newBalance
+        if session.saleBatch then session.saleBatch.changed = true end
         -- 后续发布异常不改变已经配对的结算，也不允许调用方重试。
         local ok, err = pcall(publish)
         if not ok then Log:PrintError("[EconomyService] 结算后库存通知失败", "playerId:", playerId, "itemId:", itemId, "error:", tostring(err)) end
-        if self:IsCurrent(playerId, generation) then
+        if not session.saleBatch and self:IsCurrent(playerId, generation) then
             local notified, notifyError = pcall(function()
                 context.Events:Publish("EconomyChanged", { playerId = playerId, sessionGeneration = generation, balance = session.balance })
             end)

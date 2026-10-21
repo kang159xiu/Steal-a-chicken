@@ -39,6 +39,7 @@ local NetMsg = {
         TheftCarrySnapshotRequest = 1217,
         RefreshPhase = 1220,
         RefreshSnapshotRequest = 1221,
+        GuardianDiagnosticSample = 1222, -- 临时只读追踪诊断及失效通知。
         InventorySnapshot = 1310,
         InventorySnapshotRequest = 1311,
         HotbarToggleSelection = 1312,

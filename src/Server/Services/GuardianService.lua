@@ -1,5 +1,6 @@
 local GameConfig = require "Common.Config.GameConfig"
 local GuardianTrackingService = require "Server.Services.GuardianTrackingService"
+local Diagnostic = require "Common.Debug.GuardianDiagnostic"
 
 local GuardianService = {
     Name = "GuardianService",
@@ -121,6 +122,40 @@ function GuardianService:Start(context)
             and runtime.Regions[regionRuntime.Config.RegionId] == regionRuntime
             and regionRuntime.Active == active
     end
+    -- 诊断独立拥有计时器；不改变追踪模块的运动与取消入口。
+    local diagnosticOwner = "GuardianDiagnosticServer"
+    local diagnosticRevision = 0
+    local function Sample(regionRuntime, active, phase)
+        Diagnostic.Safe(function()
+            diagnosticRevision = diagnosticRevision + 1
+            local message = { regionId = regionRuntime.Config.RegionId, sequence = active.sequence,
+                generation = active.generation, revision = diagnosticRevision, phase = phase,
+                guardianId = regionRuntime.GuardianElementId, targetId = active.rootId,
+                sentTime = Diagnostic.Time() }
+            if phase ~= "invalidated" then Diagnostic.Sample("Server", message) end
+            for _, playerId in ipairs(Character:GetAllPlayerIds() or {}) do
+                Diagnostic.Safe(function()
+                    System:SendToClient(playerId, context.NetMsg.Messages.GuardianDiagnosticSample, message)
+                end)
+            end
+        end)
+    end
+    runtime.InvalidateDiagnostic = function(regionRuntime, active)
+        if active then Sample(regionRuntime, active, "invalidated") end
+    end
+    local function ScheduleSample(regionRuntime, active, frames, delay, phase)
+        Diagnostic.Safe(function()
+            local function Read()
+                Diagnostic.Safe(function()
+                    if not IsActive(regionRuntime, active) or active.state ~= "Tracking" then return end
+                    Sample(regionRuntime, active, phase)
+                end)
+            end
+            if frames then context.Timers:AddFrame(diagnosticOwner, delay, Read)
+            else context.Timers:AddTimer(diagnosticOwner, delay, Read) end
+        end)
+    end
+
     local function RemoveCandidate(regionRuntime, rootId, operation, generation)
         for index = #regionRuntime.Candidates, 1, -1 do
             local candidate = regionRuntime.Candidates[index]
@@ -134,6 +169,7 @@ function GuardianService:Start(context)
 
     local function FinishActive(regionRuntime, active, returnedTarget, result)
         if not IsActive(regionRuntime, active) then return end
+        Sample(regionRuntime, active, "returned")
         regionRuntime.Active = nil
         if active.resolution == "caught" and returnedTarget then
             context.Events:Publish("GuardianChickenReturned", {
@@ -152,12 +188,38 @@ function GuardianService:Start(context)
         StartNext(regionRuntime)
     end
 
-    local function BeginTracking(regionRuntime, active)
+    local BeginTracking
+    BeginTracking = function(regionRuntime, active)
         if not IsActive(regionRuntime, active)
-            or (active.state ~= "Delay" and active.state ~= "Approaching") then return end
+            or (active.state ~= "Delay" and active.state ~= "Approaching")
+            or active.firstTrackingWait then return end
         active.delayTimerId = nil
+        if not regionRuntime.FirstTrackingReady then
+            if not regionRuntime.FirstTrackingPositionSet then
+                Sample(regionRuntime, active, "initial_position_before")
+                Element:SetPosition(regionRuntime.GuardianElementId,
+                    regionRuntime.GuardianReturnPosition, Element.COORDINATE.World)
+                regionRuntime.FirstTrackingPositionSet = true
+                Sample(regionRuntime, active, "initial_position_after")
+            end
+            -- 保留原Delay/Approaching取消分支；同一目标不可重复安排等待。
+            active.firstTrackingWait = true
+            local expectedState = active.state
+            active.delayTimerId = context.Timers:AddFrame(GuardianService.Name,
+                GameConfig.Runtime.EngineOperationDelayFrames, function()
+                    if not IsActive(regionRuntime, active) or active.state ~= expectedState
+                        or not active.firstTrackingWait then return end
+                    active.delayTimerId = nil
+                    active.firstTrackingWait = nil
+                    regionRuntime.FirstTrackingReady = true
+                    Sample(regionRuntime, active, "initial_position_after_two_frames")
+                    BeginTracking(regionRuntime, active)
+                end)
+            return
+        end
         active.state = "Tracking"
         local guardianConfig = regionRuntime.Config.Guardian
+        Sample(regionRuntime, active, "before_tracking")
         local started, reason = runtime.Tracker:TrackTarget({
             debugName = "区域" .. tostring(regionRuntime.Config.RegionId)
                 .. "守护者追踪鸡" .. tostring(active.rootId),
@@ -172,6 +234,7 @@ function GuardianService:Start(context)
             distanceKeep = guardianConfig.KeepDistance,
             onCaught = function(caughtResult)
                 if not IsActive(regionRuntime, active) or active.state ~= "Tracking" then return end
+                Sample(regionRuntime, active, "invalidated")
                 active.state = "Caught"
                 active.resolution = "caught"
                 context.Events:Publish("GuardianCaughtChicken", {
@@ -206,15 +269,19 @@ function GuardianService:Start(context)
             end,
         })
         if not started then
+            Sample(regionRuntime, active, "invalidated")
             error("守护者开始追踪失败，region=" .. tostring(regionRuntime.Config.RegionId)
                 .. " reason=" .. tostring(reason))
         end
+        ScheduleSample(regionRuntime, active, true, GameConfig.Runtime.EngineOperationDelayFrames, "after_two_frames")
+        ScheduleSample(regionRuntime, active, false, 1, "after_one_second")
     end
 
     local function ReturnGuardian(regionRuntime, active, reason)
         if not IsActive(regionRuntime, active) then return end
         if active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
         active.delayTimerId = nil
+        Sample(regionRuntime, active, "invalidated")
         active.state = "ManualReturning"
         active.resolution = reason
         active.playerId = nil
@@ -333,6 +400,7 @@ function GuardianService:Start(context)
         local active = regionRuntime.Active
         if not active or active.rootId ~= snapshot.chickenRootId or active.operation ~= snapshot.operation
             or active.chickenGeneration ~= snapshot.generation then return end
+        Sample(regionRuntime, active, "invalidated")
         active.resolution = "owned"
         if active.state == "Delay" then
             if active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
@@ -367,6 +435,7 @@ function GuardianService:Start(context)
         local generation = self.ResetGeneration
         for _, regionRuntime in pairs(self.Regions) do
             local active = regionRuntime.Active
+            runtime.InvalidateDiagnostic(regionRuntime, active)
             regionRuntime.Active = nil
             regionRuntime.Candidates = {}
             if active and active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
@@ -421,6 +490,8 @@ function GuardianService:Start(context)
                     GuardianElementId = guardianId,
                     TriggerBoxId = triggerBoxId,
                     GuardianReturnPosition = CopyPosition(returnPosition),
+                    FirstTrackingPositionSet = false,
+                    FirstTrackingReady = false,
                     Active = nil,
                     Candidates = {},
                 }
@@ -437,6 +508,8 @@ function GuardianService:Stop(context)
     if context.Side ~= "Server" then return end
     local runtime = context.Services.GuardianService
     if not runtime then return end
+    for _, region in pairs(runtime.Regions) do runtime.InvalidateDiagnostic(region, region.Active) end
+    Diagnostic.Safe(function() context.Timers:RemoveOwner("GuardianDiagnosticServer") end)
     context.Services.GuardianService = nil
     runtime.ResetGeneration = runtime.ResetGeneration + 1
     runtime.Resetting = true

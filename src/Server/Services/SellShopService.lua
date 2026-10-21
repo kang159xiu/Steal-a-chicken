@@ -66,6 +66,7 @@ function SellShopService:Start(context)
         if not Active() then return end
         local state = State(playerId)
         if not Current(playerId, state) then return end
+        if state.batchSync then return end
         local chickens, eggs = {}, {}
         for _, item in ipairs(inventory:GetSnapshot(playerId)) do
             local price = Price(item)
@@ -127,6 +128,15 @@ function SellShopService:Start(context)
             table.sort(batch, function(a, b) return a.sequence < b.sequence end)
         end
         state.busy = true
+        local finishInventory, finishEconomy
+        if message.action ~= "single" then
+            local reason
+            finishInventory, reason = inventory:BeginChangeBatch(playerId)
+            if not finishInventory then state.busy = false; Result(false, reason); return end
+            finishEconomy, reason = economy:BeginSaleBatch(playerId, state.generation)
+            if not finishEconomy then pcall(finishInventory); state.busy = false; Result(false, reason); return end
+            state.batchSync = true
+        end
         local results, total, success = {}, "0", true
         local ok, err = pcall(function()
             for _, candidate in ipairs(batch) do
@@ -153,15 +163,38 @@ function SellShopService:Start(context)
                 end
             end
         end)
+
+        -- 无论循环如何退出，都释放本批次；已提交资产不回滚或再次结算。
+        local function Finish(callback, label)
+            if not callback then return 0 end
+            local finished, count = pcall(callback)
+            if not finished then
+                pcall(function() Log:PrintError("[SellShopService] 批次最终通知失败", "playerId:", playerId, "requestId:", message.requestId, "stage:", label, "error:", count) end)
+                return 0
+            end
+            return count
+        end
+        Finish(finishInventory, "inventory")
+        Finish(finishEconomy, "balance")
+        state.batchSync = nil
         state.busy = false
+
+        if finishInventory then
+            if Current(playerId, state) then
+                local sent, sendError = pcall(function() SendState(playerId) end)
+                if not sent then pcall(function() Log:PrintError("[SellShopService] 批次最终通知失败", "playerId:", playerId, "requestId:", message.requestId, "stage:", "shop", "error:", sendError) end) end
+            end
+        end
         if not ok then
             Log:PrintError("[SellShopService] 出售批次异常，不重试", "playerId:", playerId,
                 "requestId:", message.requestId, "error:", tostring(err))
             Result(false, "sale_exception", results, total)
         else Result(success, success and "sold" or "partial_failure", results, total) end
-        if Current(playerId, state) then SendState(playerId) end
+        if not finishInventory and Current(playerId, state) then SendState(playerId) end
     end)
-    context.Events:Subscribe(self.Name, "InventoryChanged", function(snapshot) SendState(snapshot.playerId) end)
+    context.Events:Subscribe(self.Name, "InventoryChanged", function(snapshot)
+        SendState(snapshot.playerId)
+    end)
     context.Events:Subscribe(self.Name, "EconomyChanged", function(snapshot) SendState(snapshot.playerId) end)
     runtime.LeaveCallback = function(playerId)
         local persistence = context.Services.PersistenceService

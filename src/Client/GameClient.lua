@@ -1,3 +1,4 @@
+local GuardianDiagnosticController = require "Client.Controllers.GuardianDiagnosticController"
 local GameConfig = require "Common.Config.GameConfig"
 local PersistenceController = require "Client.Controllers.PersistenceController"
 local RefreshController = require "Client.Controllers.RefreshController"
@@ -68,6 +69,7 @@ function GameClient:Init()
     self.Context.Manager:Register(HomeAssignmentTest)
     self.Context.Manager:Register(AvatarPictureBoardTest)
     self.Context.Manager:Register(AvatarReadTest)
+    if FeatureFlags.Values.Guardian then self.Context.Manager:Register(GuardianDiagnosticController) end
     self.Context.Manager:Register(PersistenceController)
     self.Context.Manager:Register(PickupController)
     self.Context.Manager:Register(HotbarController)
