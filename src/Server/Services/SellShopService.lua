@@ -4,18 +4,6 @@ local SellShopService = { Name = "SellShopService", FeatureFlag = "SellShop", De
 local function Integer(value)
     return type(value) == "number" and value >= 0 and value < math.huge and value == math.floor(value)
 end
-local function Price(item)
-    if not item or item.count ~= 1 then return nil end
-    local value
-    if item.kind == "Chicken" then
-        local config = GameConfig.ChickenTypes[item.typeId]
-        value = config and config.ChickenSellPrice
-    elseif item.kind == "Egg" then
-        value = item.finalSellPrice
-    end
-    if not Decimal.FromSafeInteger(value) then return nil end
-    return value
-end
 function SellShopService:ValidateConfig()
     local c = GameConfig.SellShop
     local errors = {}
@@ -69,7 +57,7 @@ function SellShopService:Start(context)
         if state.batchSync then return end
         local chickens, eggs = {}, {}
         for _, item in ipairs(inventory:GetSnapshot(playerId)) do
-            local price = Price(item)
+            local price = economy:GetSalePrice(playerId, item)
             if price ~= nil then
                 local row = { itemId = item.itemId, kind = item.kind, typeId = item.typeId,
                     iconIndex = item.iconIndex, sequence = item.sequence, count = 1, sellPrice = price }
@@ -144,7 +132,7 @@ function SellShopService:Start(context)
                 local price
                 local called, sold, reason = pcall(function()
                     local item = inventory:GetItem(playerId, candidate.itemId)
-                    price = Price(item)
+                    price = economy:GetSalePrice(playerId, item)
                     if not item then return false, "item_not_found" end
                     if price == nil then return false, "invalid_item_price" end
                     return economy:SettleSale(playerId, state.generation, inventory, item.itemId, price)
@@ -155,7 +143,7 @@ function SellShopService:Start(context)
                     sold, reason = false, "sale_exception"
                 end
                 results[#results + 1] = { itemId = candidate.itemId, success = sold, reason = reason, sellPrice = sold and price or nil }
-                if sold then total = Decimal.Add(total, Decimal.FromSafeInteger(price))
+                if sold then total = Decimal.Add(total, price)
                 else
                     success = false
                     Log:PrintWarning("[SellShopService] 出售失败", "playerId:", playerId,

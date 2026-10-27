@@ -2,6 +2,8 @@
 -- NeedsConfirmation=true 表示当前值是临时值，后续必须由策划补齐或确认。
 -- 未知场景元件 ID 固定填写 0；对应区域必须保持 Enabled=false，禁止运行时寻找替代元件。
 local GameConfig = {
+    GuideLineTest = { SourceElementId = 3357, TargetElementId = 3312, EffectType = 337, UpdateSeconds = 0.1 },
+
     Runtime = {
         ServerReadyDelaySeconds = 2,
         ClientSnapshotRequestDelaySeconds = 3,
@@ -9,6 +11,7 @@ local GameConfig = {
     },
 
     Persistence = {
+        SaveIntervalSeconds = 10,
         ProductionEnabled = true, -- 发布验证通过、完整接线后才启用。
         ValidateReadIntegrity = false, -- 临时关闭读取一致性拦截；写入回读确认仍保留。
         ProbeEnabled = false,
@@ -31,7 +34,7 @@ local GameConfig = {
     Home = {
         MaxPlayers = 6,
         MidJoinTeleportDelaySeconds = 4,
-        RootElementIds = { 2428, 2631, 2704, 2777, 2850, 2923 },
+        RootElementIds = { 3654, 3975, 3750, 3825, 3943, 4093 },
         PurposeProperty = "作用",
         HomePurpose = "家园",
         OwnerNameProperty = "归属玩家",
@@ -76,26 +79,26 @@ local GameConfig = {
         MaxDistance = 300, MaxLevel = 20,
     },
     HomeLevels = {
-        { Level = 1, ChickenCapacity = 5, EggCapacity = 6, UpgradeCost = "100" },--100
-        { Level = 2, ChickenCapacity = 6, EggCapacity = 7, UpgradeCost = "10000" },--10000
-        { Level = 3, ChickenCapacity = 7, EggCapacity = 8, UpgradeCost = "100000" },--100000
-        { Level = 4, ChickenCapacity = 8, EggCapacity = 9, UpgradeCost = "1000000" },--1000000
-        { Level = 5, ChickenCapacity = 9, EggCapacity = 10, UpgradeCost = "10000000" },--10000000
-        { Level = 6, ChickenCapacity = 10, EggCapacity = 11, UpgradeCost = "100000000" },--100000000
-        { Level = 7, ChickenCapacity = 11, EggCapacity = 12, UpgradeCost = "1000000000" },--1000000000
-        { Level = 8, ChickenCapacity = 12, EggCapacity = 13, UpgradeCost = "10000000000" },--10000000000
-        { Level = 9, ChickenCapacity = 13, EggCapacity = 14, UpgradeCost = "100000000000" },--100000000000
-        { Level = 10, ChickenCapacity = 14, EggCapacity = 15, UpgradeCost = "1000000000000" },--1000000000000
-        { Level = 11, ChickenCapacity = 15, EggCapacity = 16, UpgradeCost = "10000000000000" },--10000000000000
-        { Level = 12, ChickenCapacity = 16, EggCapacity = 17, UpgradeCost = "100000000000000" },--100000000000000
-        { Level = 13, ChickenCapacity = 17, EggCapacity = 18, UpgradeCost = "1000000000000000" },--1000000000000000
-        { Level = 14, ChickenCapacity = 18, EggCapacity = 19, UpgradeCost = "10000000000000000" },--10000000000000000
-        { Level = 15, ChickenCapacity = 19, EggCapacity = 20, UpgradeCost = "100000000000000000" },--100000000000000000
-        { Level = 16, ChickenCapacity = 20, EggCapacity = 21, UpgradeCost = "1000000000000000000" },--1000000000000000000
-        { Level = 17, ChickenCapacity = 21, EggCapacity = 22, UpgradeCost = "10000000000000000000" },--10000000000000000000
-        { Level = 18, ChickenCapacity = 22, EggCapacity = 23, UpgradeCost = "100000000000000000000" },--100000000000000000000
-        { Level = 19, ChickenCapacity = 23, EggCapacity = 24, UpgradeCost = "1000000000000000000000" },--1000000000000000000000
-        { Level = 20, ChickenCapacity = 24, EggCapacity = 25, UpgradeCost = nil },
+        { Level = 1, ChickenCapacity = 5, EggCapacity = 8, UpgradeCost = "100" },--100
+        { Level = 2, ChickenCapacity = 6, EggCapacity = 10, UpgradeCost = "10000" },--10000
+        { Level = 3, ChickenCapacity = 7, EggCapacity = 12, UpgradeCost = "100000" },--100000
+        { Level = 4, ChickenCapacity = 8, EggCapacity = 14, UpgradeCost = "1000000" },--1000000
+        { Level = 5, ChickenCapacity = 9, EggCapacity = 16, UpgradeCost = "10000000" },--10000000
+        { Level = 6, ChickenCapacity = 10, EggCapacity = 18, UpgradeCost = "100000000" },--100000000
+        { Level = 7, ChickenCapacity = 11, EggCapacity = 20, UpgradeCost = "1000000000" },--1000000000
+        { Level = 8, ChickenCapacity = 12, EggCapacity = 22, UpgradeCost = "10000000000" },--10000000000
+        { Level = 9, ChickenCapacity = 13, EggCapacity = 24, UpgradeCost = "100000000000" },--100000000000
+        { Level = 10, ChickenCapacity = 14, EggCapacity = 26, UpgradeCost = "1000000000000" },--1000000000000
+        { Level = 11, ChickenCapacity = 15, EggCapacity = 28, UpgradeCost = "10000000000000" },--10000000000000
+        { Level = 12, ChickenCapacity = 16, EggCapacity = 30, UpgradeCost = "100000000000000" },--100000000000000
+        { Level = 13, ChickenCapacity = 17, EggCapacity = 32, UpgradeCost = "1000000000000000" },--1000000000000000
+        { Level = 14, ChickenCapacity = 18, EggCapacity = 34, UpgradeCost = "10000000000000000" },--10000000000000000
+        { Level = 15, ChickenCapacity = 19, EggCapacity = 36, UpgradeCost = "100000000000000000" },--1₀₀₀₀₀₀₀₀₀₀₀₀₀₀₀₀₀
+        { Level = 16, ChickenCapacity = 20, EggCapacity = 38, UpgradeCost = "1000000000000000000" },--1００００００００００００００５５５
+        { Level = 17, ChickenCapacity = 21, EggCapacity = 40, UpgradeCost = "10000000000000000000" },--1５５５５５５５５５５５５５５５５５５
+        { Level = 18, ChickenCapacity = 22, EggCapacity = 42, UpgradeCost = "100000000000000000000" },--1７７７７７７７７７７７７７７７７７７
+        { Level = 19, ChickenCapacity = 23, EggCapacity = 44, UpgradeCost = "1000000000000000000000" },--1000000000000000000000
+        { Level = 20, ChickenCapacity = 24, EggCapacity = 46, UpgradeCost = nil },
     },
 
     -- 第10步：跑步机和独立玩家速度成长。
@@ -103,6 +106,7 @@ local GameConfig = {
         DefaultLevel = 1, MaxLevel = 20,
         ExperienceTickSeconds = 0.2,
         TrainingPurpose = "跑步机触发盒", PositionPurpose = "跑步机",
+        ExperienceDisplayPurpose = "跑步机速度",
         OwnerNameProperty = "归属玩家",
         UiGroupId = 100373, LevelTextId = 100374, PriceTextId = 100375, UpgradeButtonId = 100371,
         FeedbackGroupId = 100244, FeedbackTextId = 100243, FeedbackImageId = 100242,
@@ -116,56 +120,111 @@ local GameConfig = {
     TreadmillLevels = {
         { Level = 1, ExperiencePerTick = "2", UpgradeCost = "10", TemplateRootId = 255 },
         { Level = 2, ExperiencePerTick = "4", UpgradeCost = "1000", TemplateRootId = 2078 },
-        { Level = 3, ExperiencePerTick = "6", UpgradeCost = "100000", TemplateRootId = 2080 },
-        { Level = 4, ExperiencePerTick = "8", UpgradeCost = "10000000", TemplateRootId = 2082 },
-        { Level = 5, ExperiencePerTick = "10", UpgradeCost = "1000000000", TemplateRootId = 2084 },
-        { Level = 6, ExperiencePerTick = "12", UpgradeCost = "100000000000", TemplateRootId = 2086 },
-        { Level = 7, ExperiencePerTick = "14", UpgradeCost = "10000000000000", TemplateRootId = 2088 },
-        { Level = 8, ExperiencePerTick = "16", UpgradeCost = "1000000000000000", TemplateRootId = 2090 },
-        { Level = 9, ExperiencePerTick = "18", UpgradeCost = "100000000000000000", TemplateRootId = 2092 },
-        { Level = 10, ExperiencePerTick = "20", UpgradeCost = "10000000000000000000", TemplateRootId = 2094 },
-        { Level = 11, ExperiencePerTick = "22", UpgradeCost = "1000000000000000000000", TemplateRootId = 2096 },
-        { Level = 12, ExperiencePerTick = "24", UpgradeCost = "100000000000000000000000", TemplateRootId = 2098 },
-        { Level = 13, ExperiencePerTick = "26", UpgradeCost = "10000000000000000000000000", TemplateRootId = 2100 },
-        { Level = 14, ExperiencePerTick = "28", UpgradeCost = "1000000000000000000000000000", TemplateRootId = 2102 },
-        { Level = 15, ExperiencePerTick = "30", UpgradeCost = "100000000000000000000000000000", TemplateRootId = 2104 },
-        { Level = 16, ExperiencePerTick = "32", UpgradeCost = "10000000000000000000000000000000", TemplateRootId = 2106 },
-        { Level = 17, ExperiencePerTick = "34", UpgradeCost = "1000000000000000000000000000000000", TemplateRootId = 2108 },
-        { Level = 18, ExperiencePerTick = "36", UpgradeCost = "100000000000000000000000000000000000", TemplateRootId = 2110 },
-        { Level = 19, ExperiencePerTick = "38", UpgradeCost = "10000000000000000000000000000000000000", TemplateRootId = 2112 },
-        { Level = 20, ExperiencePerTick = "40", UpgradeCost = nil, TemplateRootId = 2114 },
+        { Level = 3, ExperiencePerTick = "10", UpgradeCost = "100000", TemplateRootId = 2080 },
+        { Level = 4, ExperiencePerTick = "20", UpgradeCost = "10000000", TemplateRootId = 2082 },
+        { Level = 5, ExperiencePerTick = "50", UpgradeCost = "1000000000", TemplateRootId = 2084 },
+        { Level = 6, ExperiencePerTick = "100", UpgradeCost = "100000000000", TemplateRootId = 2086 },
+        { Level = 7, ExperiencePerTick = "200", UpgradeCost = "10000000000000", TemplateRootId = 2088 },
+        { Level = 8, ExperiencePerTick = "500", UpgradeCost = "1000000000000000", TemplateRootId = 2090 },
+        { Level = 9, ExperiencePerTick = "1000", UpgradeCost = "100000000000000000", TemplateRootId = 2092 },
+        { Level = 10, ExperiencePerTick = "2000", UpgradeCost = "10000000000000000000", TemplateRootId = 2094 },
+        { Level = 11, ExperiencePerTick = "4000", UpgradeCost = "1000000000000000000000", TemplateRootId = 2096 },
+        { Level = 12, ExperiencePerTick = "7000", UpgradeCost = "100000000000000000000000", TemplateRootId = 2098 },
+        { Level = 13, ExperiencePerTick = "12000", UpgradeCost = "10000000000000000000000000", TemplateRootId = 2100 },
+        { Level = 14, ExperiencePerTick = "20000", UpgradeCost = "1000000000000000000000000000", TemplateRootId = 2102 },
+        { Level = 15, ExperiencePerTick = "35000", UpgradeCost = "100000000000000000000000000000", TemplateRootId = 2104 },
+        { Level = 16, ExperiencePerTick = "60000", UpgradeCost = "10000000000000000000000000000000", TemplateRootId = 2106 },
+        { Level = 17, ExperiencePerTick = "100000", UpgradeCost = "1000000000000000000000000000000000", TemplateRootId = 2108 },
+        { Level = 18, ExperiencePerTick = "180000", UpgradeCost = "100000000000000000000000000000000000", TemplateRootId = 2110 },
+        { Level = 19, ExperiencePerTick = "300000", UpgradeCost = "10000000000000000000000000000000000000", TemplateRootId = 2112 },
+        { Level = 20, ExperiencePerTick = "500000", UpgradeCost = nil, TemplateRootId = 2114 },
     },
     PlayerSpeed = {
-        DefaultLevel = 1, MaxLevel = 20,
-        BaseWalkSpeed = 500, WalkSpeedPerLevel = 178, MaxWalkSpeed = 3882,
-        MaxExperience = "1197000",
+        DefaultLevel = 1, BaseWalkSpeed = 500, WalkSpeedPerLevel = 17,
+        FirstUpgradeExperience = "100", ExperienceGrowthPercent = 112,
     },
+
+    Prompt = { TemplateId = 106236, TextId = 106234, X = -180, Y = -430,
+        VisibleSeconds = 3, HideSeconds = 1, AnimationIndex = 1 },
+
+    TrackShop = {
+        TileViewId = 106273, TemplateId = 106285, NameTextId = 106284,
+        MultiplierTextId = 106539, ActionTextId = 106282, ButtonId = 106281,
+        ImageId = 106280, ImagePropertyName = "踪迹图片组",
+        Tracks = {
+            { Name = "踪迹1", Multiplier = 1.5, Price = "100" },
+            { Name = "踪迹2", Multiplier = 2, Price = "5000" },
+            { Name = "踪迹3", Multiplier = 2.5, Price = "75000" },
+            { Name = "踪迹4", Multiplier = 3, Price = "1500000" },
+            { Name = "踪迹5", Multiplier = 3.5, Price = "30000000" },
+            { Name = "踪迹6", Multiplier = 4, Price = "750000000" },
+            { Name = "踪迹7", Multiplier = 5, Price = "20000000000" },
+            { Name = "踪迹8", Multiplier = 7, Price = "300000000000" },
+            { Name = "踪迹9", Multiplier = 10, Price = "1000000000000" },
+        },
+    },
+    MultiplierPurchase = {
+        Coin = { ButtonId = 106028, GroupId = 106030, NextTextId = 106237, CurrentTextId = 106239, Products = {
+            { Multiplier = 2, GoodsId = 27, ItemId = "props1126663748431067517926513061" },
+            { Multiplier = 3, GoodsId = 28, ItemId = "props1126663748431067517926542141" },
+            { Multiplier = 4, GoodsId = 29, ItemId = "props1126663748431067517926542151" },
+        } },
+        Training = { ButtonId = 106025, GroupId = 106027, NextTextId = 106238, CurrentTextId = 106240, Products = {
+            { Multiplier = 5, GoodsId = 33, ItemId = "props1126663748431067517926513081" },
+            { Multiplier = 10, GoodsId = 34, ItemId = "props1126663748431067517926542171" },
+            { Multiplier = 20, GoodsId = 35, ItemId = "props1126663748431067517926542181" },
+        } },
+    },
+
+    RebirthPurchase = { ButtonId = 104520, Products = {
+        { Count = 0, GoodsId = 1, ItemId = "props1126663748431067517925467031" },
+        { Count = 1, GoodsId = 3, ItemId = "props1126663748431067517925467033" },
+        { Count = 2, GoodsId = 4, ItemId = "props1126663748431067517925467035" },
+        { Count = 3, GoodsId = 6, ItemId = "props1126663748431067517925467037" },
+        { Count = 4, GoodsId = 7, ItemId = "props1126663748431067517925467039" },
+        { Count = 5, GoodsId = 8, ItemId = "props11266637484310675179254670311" },
+        { Count = 6, GoodsId = 9, ItemId = "props11266637484310675179254670313" },
+        { Count = 7, GoodsId = 10, ItemId = "props11266637484310675179254670315" },
+        { Count = 8, GoodsId = 11, ItemId = "props11266637484310675179254670317" },
+        { Count = 9, GoodsId = 12, ItemId = "props11266637484310675179254670319" },
+        { Count = 10, GoodsId = 13, ItemId = "props11266637484310675179254670321" },
+        { Count = 11, GoodsId = 14, ItemId = "props11266637484310675179254670323" },
+        { Count = 12, GoodsId = 17, ItemId = "props11266637484310675179254670325" },
+        { Count = 13, GoodsId = 18, ItemId = "props11266637484310675179254670327" },
+        { Count = 14, GoodsId = 19, ItemId = "props11266637484310675179254670329" },
+        { Count = 15, GoodsId = 20, ItemId = "props1126663748431067517925467041" },
+        { Count = 16, GoodsId = 21, ItemId = "props1126663748431067517925467043" },
+        { Count = 17, GoodsId = 22, ItemId = "props1126663748431067517925467045" },
+        { Count = 18, GoodsId = 23, ItemId = "props1126663748431067517926376371" },
+        { Count = 19, GoodsId = 24, ItemId = "props1126663748431067517926377001" },
+    } },
 
     Rebirth = {
         MaxCount = 20, MultiplierTextId = 104519, ProgressId = 104517,
-        ExperienceTextId = 104518, ButtonId = 100394,
+        ExperienceTextId = 104518, ButtonId = 100394, CountTextId = 106172,
     },
+    -- Multiplier表示重生提供的金币倍率；训练倍率由永久训练购买及踪迹决定。
     RebirthLevels = {
         { Count = 1, ExperienceRequired = "80", Multiplier = 1.5 },
-        { Count = 2, ExperienceRequired = "2000", Multiplier = 2 },
-        { Count = 3, ExperienceRequired = "24000", Multiplier = 2.5 },
-        { Count = 4, ExperienceRequired = "45000", Multiplier = 3 },
-        { Count = 5, ExperienceRequired = "72000", Multiplier = 3.5 },
-        { Count = 6, ExperienceRequired = "105000", Multiplier = 4 },
-        { Count = 7, ExperienceRequired = "144000", Multiplier = 4.5 },
-        { Count = 8, ExperienceRequired = "189000", Multiplier = 5 },
-        { Count = 9, ExperienceRequired = "240000", Multiplier = 5.5 },
-        { Count = 10, ExperienceRequired = "297000", Multiplier = 6 },
-        { Count = 11, ExperienceRequired = "360000", Multiplier = 6.5 },
-        { Count = 12, ExperienceRequired = "429000", Multiplier = 7 },
-        { Count = 13, ExperienceRequired = "504000", Multiplier = 7.5 },
-        { Count = 14, ExperienceRequired = "585000", Multiplier = 8 },
-        { Count = 15, ExperienceRequired = "672000", Multiplier = 8.5 },
-        { Count = 16, ExperienceRequired = "765000", Multiplier = 9 },
-        { Count = 17, ExperienceRequired = "864000", Multiplier = 9.5 },
-        { Count = 18, ExperienceRequired = "969000", Multiplier = 10 },
-        { Count = 19, ExperienceRequired = "1080000", Multiplier = 10.5 },
-        { Count = 20, ExperienceRequired = "1197000", Multiplier = 11 },
+        { Count = 2, ExperienceRequired = "1000", Multiplier = 2 },
+        { Count = 3, ExperienceRequired = "15000", Multiplier = 2.5 },
+        { Count = 4, ExperienceRequired = "225000", Multiplier = 3 },
+        { Count = 5, ExperienceRequired = "2700000", Multiplier = 3.5 },
+        { Count = 6, ExperienceRequired = "40500000", Multiplier = 4 },
+        { Count = 7, ExperienceRequired = "445500000", Multiplier = 4.5 },
+        { Count = 8, ExperienceRequired = "6682500000", Multiplier = 5 },
+        { Count = 9, ExperienceRequired = "53460000000", Multiplier = 5.5 },
+        { Count = 10, ExperienceRequired = "588060000000", Multiplier = 6 },
+        { Count = 11, ExperienceRequired = "4116420000000", Multiplier = 6.5 },
+        { Count = 12, ExperienceRequired = "45280620000000", Multiplier = 7 },
+        { Count = 13, ExperienceRequired = "498086820000000", Multiplier = 7.5 },
+        { Count = 14, ExperienceRequired = "6475128660000000", Multiplier = 8 },
+        { Count = 15, ExperienceRequired = "58276157940000000", Multiplier = 8.5 },
+        { Count = 16, ExperienceRequired = "582761579400000000", Multiplier = 9 },
+        { Count = 17, ExperienceRequired = "6993138952800000000", Multiplier = 9.5 },
+        { Count = 18, ExperienceRequired = "55945111622400000000", Multiplier = 10 },
+        { Count = 19, ExperienceRequired = "839176674336000000000", Multiplier = 10.5 },
+        { Count = 20, ExperienceRequired = "8391766743360000000000", Multiplier = 11 },
     },
 
     EggCollection = {
@@ -195,6 +254,8 @@ local GameConfig = {
         TextRefreshSeconds = 0.2,
     },
 
+    ChickenDisplay = { PurposeProperty = "作用", EggValuePurpose = "产出蛋价值", NamePurpose = "鸡名称", CountdownPurpose = "倒计时" },
+
     Placement = {
         UiGroupId = 100048,
         PlaceButtonId = 100047,
@@ -204,6 +265,7 @@ local GameConfig = {
     },
 
     Theft = {
+        GuardianPlayerAnchorSourceId = 3357,
         -- 正式拾取与携带保持开启；刷新由 Refresh.Enabled 单独控制。
         InteractionEnabled = true,
         -- 当前区域全部鸡登记成功后，等待该间隔再生成下一启用区域。
@@ -214,6 +276,7 @@ local GameConfig = {
         CarryUiGroupId = 104287,
         ManualDropButtonId = 104285,
         GuardianManualMoveSeconds = 2,
+        ManualDropReturnSeconds = 30,
         HoldSeconds = 1,
         ProgressTickSeconds = 0.02,
         DistanceCheckSeconds = 0.2,
@@ -239,6 +302,7 @@ local GameConfig = {
         "Chicken6", "Chicken7", "Chicken8", "Chicken9", "Chicken10",
         "Chicken11", "Chicken12", "Chicken13", "Chicken14", "Chicken15",
         "Chicken16", "Chicken17", "Chicken18", "Chicken19", "Chicken20",
+        "Chicken21", "Chicken22", "Chicken23", "Chicken24", "Chicken25", "Chicken26",
     },
     ChickenTypes = {
         Chicken1 = {
@@ -250,7 +314,7 @@ local GameConfig = {
             ChickenSellPrice = 50,
             Egg = {
                 Enabled = true,
-                EggTypeId = "Egg1",
+                EggTypeId = "Egg1", DisplayName = "蛋1",
                 TemplateRootId = 1604,
                 IconIndex = 1,
                 ProductionIntervalSeconds = 6,
@@ -262,153 +326,201 @@ local GameConfig = {
             Enabled = true, DisplayName = "鸡2", TemplateRootId = 1342,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 2, ChickenSellPrice = 100,
-            Egg = { Enabled = true, EggTypeId = "Egg2", TemplateRootId = 1761,
+            Egg = { Enabled = true, EggTypeId = "Egg2", DisplayName = "蛋2", TemplateRootId = 1761,
                 IconIndex = 2,
-                ProductionIntervalSeconds = 6, HatchDurationSeconds = 5, SellPrice = 20 },
+                ProductionIntervalSeconds = 6, HatchDurationSeconds = 5, SellPrice = 100 },
         },
         Chicken3 = {
             Enabled = true, DisplayName = "鸡3", TemplateRootId = 1344,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 3, ChickenSellPrice = 200,
-            Egg = { Enabled = true, EggTypeId = "Egg3", TemplateRootId = 1765,
+            Egg = { Enabled = true, EggTypeId = "Egg3", DisplayName = "蛋3", TemplateRootId = 1765,
                 IconIndex = 3,
-                ProductionIntervalSeconds = 6, HatchDurationSeconds = 5, SellPrice = 30 },
+                ProductionIntervalSeconds = 6, HatchDurationSeconds = 5, SellPrice = 800 },
         },
         Chicken4 = {
             Enabled = true, DisplayName = "鸡4", TemplateRootId = 1346,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 4, ChickenSellPrice = 400,
-            Egg = { Enabled = true, EggTypeId = "Egg4", TemplateRootId = 1769,
+            Egg = { Enabled = true, EggTypeId = "Egg4", DisplayName = "蛋4", TemplateRootId = 1769,
                 IconIndex = 4,
-                ProductionIntervalSeconds = 6, HatchDurationSeconds = 5, SellPrice = 40 },
+                ProductionIntervalSeconds = 6, HatchDurationSeconds = 5, SellPrice = 2300 },
         },
         Chicken5 = {
             Enabled = true, DisplayName = "鸡5", TemplateRootId = 1348,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 5, ChickenSellPrice = 800,
-            Egg = { Enabled = true, EggTypeId = "Egg5", TemplateRootId = 1773,
+            Egg = { Enabled = true, EggTypeId = "Egg5", DisplayName = "蛋5", TemplateRootId = 1773,
                 IconIndex = 5,
-                ProductionIntervalSeconds = 6, HatchDurationSeconds = 5, SellPrice = 50 },
+                ProductionIntervalSeconds = 6, HatchDurationSeconds = 5, SellPrice = 5000 },
         },
         Chicken6 = {
             Enabled = true, DisplayName = "鸡6", TemplateRootId = 1350,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 6, ChickenSellPrice = 1600,
-            Egg = { Enabled = true, EggTypeId = "Egg6", TemplateRootId = 1777,
+            Egg = { Enabled = true, EggTypeId = "Egg6", DisplayName = "蛋6", TemplateRootId = 1777,
                 IconIndex = 6,
-                ProductionIntervalSeconds = 6, HatchDurationSeconds = 20, SellPrice = 600 },
+                ProductionIntervalSeconds = 6, HatchDurationSeconds = 20, SellPrice = 9000 },
         },
         Chicken7 = {
             Enabled = true, DisplayName = "鸡7", TemplateRootId = 1352,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 7, ChickenSellPrice = 3800,
-            Egg = { Enabled = true, EggTypeId = "Egg7", TemplateRootId = 1781,
+            Egg = { Enabled = true, EggTypeId = "Egg7", DisplayName = "蛋7", TemplateRootId = 1781,
                 IconIndex = 7,
-                ProductionIntervalSeconds = 10, HatchDurationSeconds = 20, SellPrice = 800 },
+                ProductionIntervalSeconds = 10, HatchDurationSeconds = 20, SellPrice = 25000 },
         },
         Chicken8 = {
             Enabled = true, DisplayName = "鸡8", TemplateRootId = 1354,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 8, ChickenSellPrice = 7600,
-            Egg = { Enabled = true, EggTypeId = "Egg8", TemplateRootId = 1785,
+            Egg = { Enabled = true, EggTypeId = "Egg8", DisplayName = "蛋8", TemplateRootId = 1785,
                 IconIndex = 8,
-                ProductionIntervalSeconds = 10, HatchDurationSeconds = 20, SellPrice = 1000 },
+                ProductionIntervalSeconds = 10, HatchDurationSeconds = 20, SellPrice = 60000 },
         },
         Chicken9 = {
             Enabled = true, DisplayName = "鸡9", TemplateRootId = 1356,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 9, ChickenSellPrice = 15200,
-            Egg = { Enabled = true, EggTypeId = "Egg9", TemplateRootId = 1789,
+            Egg = { Enabled = true, EggTypeId = "Egg9", DisplayName = "蛋9", TemplateRootId = 1789,
                 IconIndex = 9,
-                ProductionIntervalSeconds = 10, HatchDurationSeconds = 20, SellPrice = 1000 },
+                ProductionIntervalSeconds = 10, HatchDurationSeconds = 20, SellPrice = 150000 },
         },
         Chicken10 = {
             Enabled = true, DisplayName = "鸡10", TemplateRootId = 1358,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 10, ChickenSellPrice = 30000,
-            Egg = { Enabled = true, EggTypeId = "Egg10", TemplateRootId = 1793,
+            Egg = { Enabled = true, EggTypeId = "Egg10", DisplayName = "蛋10", TemplateRootId = 1793,
                 IconIndex = 10,
-                ProductionIntervalSeconds = 10, HatchDurationSeconds = 20, SellPrice = 1000 },
+                ProductionIntervalSeconds = 10, HatchDurationSeconds = 20, SellPrice = 300000 },
         },
         Chicken11 = {
             Enabled = true, DisplayName = "鸡11", TemplateRootId = 1360,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 11, ChickenSellPrice = 60000,
-            Egg = { Enabled = true, EggTypeId = "Egg11", TemplateRootId = 1797,
+            Egg = { Enabled = true, EggTypeId = "Egg11", DisplayName = "蛋11", TemplateRootId = 1797,
                 IconIndex = 11,
-                ProductionIntervalSeconds = 10, HatchDurationSeconds = 30, SellPrice = 5000 },
+                ProductionIntervalSeconds = 10, HatchDurationSeconds = 30, SellPrice = 650000 },
         },
         Chicken12 = {
             Enabled = true, DisplayName = "鸡12", TemplateRootId = 1362,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 12, ChickenSellPrice = 90000,
-            Egg = { Enabled = true, EggTypeId = "Egg12", TemplateRootId = 1801,
+            Egg = { Enabled = true, EggTypeId = "Egg12", DisplayName = "蛋12", TemplateRootId = 1801,
                 IconIndex = 12,
-                ProductionIntervalSeconds = 10, HatchDurationSeconds = 30, SellPrice = 5000 },
+                ProductionIntervalSeconds = 10, HatchDurationSeconds = 30, SellPrice = 1200000 },
         },
         Chicken13 = {
             Enabled = true, DisplayName = "鸡13", TemplateRootId = 1364,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 13, ChickenSellPrice = 120000,
-            Egg = { Enabled = true, EggTypeId = "Egg13", TemplateRootId = 1805,
+            Egg = { Enabled = true, EggTypeId = "Egg13", DisplayName = "蛋13", TemplateRootId = 1805,
                 IconIndex = 13,
-                ProductionIntervalSeconds = 15, HatchDurationSeconds = 30, SellPrice = 5000 },
+                ProductionIntervalSeconds = 15, HatchDurationSeconds = 30, SellPrice = 2500000 },
         },
         Chicken14 = {
             Enabled = true, DisplayName = "鸡14", TemplateRootId = 1366,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 14, ChickenSellPrice = 150000,
-            Egg = { Enabled = true, EggTypeId = "Egg14", TemplateRootId = 1809,
+            Egg = { Enabled = true, EggTypeId = "Egg14", DisplayName = "蛋14", TemplateRootId = 1809,
                 IconIndex = 14,
-                ProductionIntervalSeconds = 15, HatchDurationSeconds = 30, SellPrice = 5000 },
+                ProductionIntervalSeconds = 15, HatchDurationSeconds = 30, SellPrice = 4000000 },
         },
         Chicken15 = {
             Enabled = true, DisplayName = "鸡15", TemplateRootId = 1368,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 15, ChickenSellPrice = 180000,
-            Egg = { Enabled = true, EggTypeId = "Egg15", TemplateRootId = 1813,
+            Egg = { Enabled = true, EggTypeId = "Egg15", DisplayName = "蛋15", TemplateRootId = 1813,
                 IconIndex = 15,
-                ProductionIntervalSeconds = 15, HatchDurationSeconds = 60, SellPrice = 10000 },
+                ProductionIntervalSeconds = 15, HatchDurationSeconds = 60, SellPrice = 600000 },
         },
         Chicken16 = {
             Enabled = true, DisplayName = "鸡16", TemplateRootId = 1370,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 16, ChickenSellPrice = 210000,
-            Egg = { Enabled = true, EggTypeId = "Egg16", TemplateRootId = 1817,
+            Egg = { Enabled = true, EggTypeId = "Egg16", DisplayName = "蛋16", TemplateRootId = 1817,
                 IconIndex = 16,
-                ProductionIntervalSeconds = 15, HatchDurationSeconds = 60, SellPrice = 10000 },
+                ProductionIntervalSeconds = 15, HatchDurationSeconds = 60, SellPrice = 1200000 },
         },
         Chicken17 = {
             Enabled = true, DisplayName = "鸡17", TemplateRootId = 1372,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 17, ChickenSellPrice = 240000,
-            Egg = { Enabled = true, EggTypeId = "Egg17", TemplateRootId = 1821,
+            Egg = { Enabled = true, EggTypeId = "Egg17", DisplayName = "蛋17", TemplateRootId = 1821,
                 IconIndex = 17,
-                ProductionIntervalSeconds = 20, HatchDurationSeconds = 60, SellPrice = 10000 },
+                ProductionIntervalSeconds = 20, HatchDurationSeconds = 60, SellPrice = 2500000 },
         },
         Chicken18 = {
             Enabled = true, DisplayName = "鸡18", TemplateRootId = 1374,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 18, ChickenSellPrice = 270000,
-            Egg = { Enabled = true, EggTypeId = "Egg18", TemplateRootId = 1825,
+            Egg = { Enabled = true, EggTypeId = "Egg18", DisplayName = "蛋18", TemplateRootId = 1825,
                 IconIndex = 18,
-                ProductionIntervalSeconds = 20, HatchDurationSeconds = 60, SellPrice = 10000 },
+                ProductionIntervalSeconds = 20, HatchDurationSeconds = 60, SellPrice = 5000000 },
         },
         Chicken19 = {
             Enabled = true, DisplayName = "鸡19", TemplateRootId = 1376,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 19, ChickenSellPrice = 300000,
-            Egg = { Enabled = true, EggTypeId = "Egg19", TemplateRootId = 1829,
+            Egg = { Enabled = true, EggTypeId = "Egg19", DisplayName = "蛋19", TemplateRootId = 1829,
                 IconIndex = 19,
-                ProductionIntervalSeconds = 20, HatchDurationSeconds = 120, SellPrice = 20000 },
+                ProductionIntervalSeconds = 20, HatchDurationSeconds = 100, SellPrice = 10000000 },
         },
         Chicken20 = {
             Enabled = true, DisplayName = "鸡20", TemplateRootId = 1378,
             RequiredPurpose = "鸡父元件",
             ChickenIconIndex = 20, ChickenSellPrice = 330000,
-            Egg = { Enabled = true, EggTypeId = "Egg20", TemplateRootId = 1833,
+            Egg = { Enabled = true, EggTypeId = "Egg20", DisplayName = "蛋20", TemplateRootId = 1833,
                 IconIndex = 20,
-                ProductionIntervalSeconds = 20, HatchDurationSeconds = 120, SellPrice = 20000 },
+                ProductionIntervalSeconds = 20, HatchDurationSeconds = 100, SellPrice = 20000000 },
+        },
+        Chicken21 = {
+            Enabled = true, DisplayName = "鸡21", TemplateRootId = 4676,
+            RequiredPurpose = "鸡父元件",
+            ChickenIconIndex = 21, ChickenSellPrice = 360000,
+            Egg = { Enabled = true, EggTypeId = "Egg21", DisplayName = "蛋21", TemplateRootId = 4720,
+                IconIndex = 21,
+                ProductionIntervalSeconds = 20, HatchDurationSeconds = 100, SellPrice = 40000000 },
+        },
+        Chicken22 = {
+            Enabled = true, DisplayName = "鸡22", TemplateRootId = 4679,
+            RequiredPurpose = "鸡父元件",
+            ChickenIconIndex = 22, ChickenSellPrice = 390000,
+            Egg = { Enabled = true, EggTypeId = "Egg22", DisplayName = "蛋22", TemplateRootId = 4724,
+                IconIndex = 22,
+                ProductionIntervalSeconds = 20, HatchDurationSeconds = 100, SellPrice = 80000000 },
+        },
+        Chicken23 = {
+            Enabled = true, DisplayName = "鸡23", TemplateRootId = 4682,
+            RequiredPurpose = "鸡父元件",
+            ChickenIconIndex = 23, ChickenSellPrice = 420000,
+            Egg = { Enabled = true, EggTypeId = "Egg23", DisplayName = "蛋23", TemplateRootId = 4728,
+                IconIndex = 23,
+                ProductionIntervalSeconds = 20, HatchDurationSeconds = 100, SellPrice = 160000000 },
+        },
+        Chicken24 = {
+            Enabled = true, DisplayName = "鸡24", TemplateRootId = 4685,
+            RequiredPurpose = "鸡父元件",
+            ChickenIconIndex = 24, ChickenSellPrice = 450000,
+            Egg = { Enabled = true, EggTypeId = "Egg24", DisplayName = "蛋24", TemplateRootId = 4708,
+                IconIndex = 24,
+                ProductionIntervalSeconds = 20, HatchDurationSeconds = 100, SellPrice = 320000000 },
+        },
+        Chicken25 = {
+            Enabled = true, DisplayName = "鸡25", TemplateRootId = 4688,
+            RequiredPurpose = "鸡父元件",
+            ChickenIconIndex = 25, ChickenSellPrice = 480000,
+            Egg = { Enabled = true, EggTypeId = "Egg25", DisplayName = "蛋25", TemplateRootId = 4712,
+                IconIndex = 25,
+                ProductionIntervalSeconds = 20, HatchDurationSeconds = 100, SellPrice = 640000000 },
+        },
+        Chicken26 = {
+            Enabled = true, DisplayName = "鸡26", TemplateRootId = 4691,
+            RequiredPurpose = "鸡父元件",
+            ChickenIconIndex = 26, ChickenSellPrice = 510000,
+            Egg = { Enabled = true, EggTypeId = "Egg26", DisplayName = "蛋26", TemplateRootId = 4716,
+                IconIndex = 26,
+                ProductionIntervalSeconds = 20, HatchDurationSeconds = 100, SellPrice = 1280000000 },
         },
     },
 
@@ -417,6 +529,7 @@ local GameConfig = {
         "Egg6", "Egg7", "Egg8", "Egg9", "Egg10",
         "Egg11", "Egg12", "Egg13", "Egg14", "Egg15",
         "Egg16", "Egg17", "Egg18", "Egg19", "Egg20",
+        "Egg21", "Egg22", "Egg23", "Egg24", "Egg25", "Egg26",
     },
 
     Hotbar = {
@@ -482,7 +595,7 @@ local GameConfig = {
                 { ChickenType = "Chicken3", Weight = 30 },
                 { ChickenType = "Chicken4", Weight = 10 },
                 { ChickenType = "Chicken5", Weight = 9 },
-                { ChickenType = "Chicken9", Weight = 1 },
+                { ChickenType = "Chicken10", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 600,
                 Acceleration = 150, MaxSpeed = 960, KeepDistance = 0,
@@ -491,11 +604,11 @@ local GameConfig = {
         {
             RegionId = 3, Enabled = true, RegionRootId = 1045, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken2", Weight = 50 },
-                { ChickenType = "Chicken3", Weight = 30 },
-                { ChickenType = "Chicken4", Weight = 10 },
-                { ChickenType = "Chicken5", Weight = 9 },
-                { ChickenType = "Chicken10", Weight = 1 },
+                { ChickenType = "Chicken3", Weight = 50 },
+                { ChickenType = "Chicken4", Weight = 30 },
+                { ChickenType = "Chicken5", Weight = 10 },
+                { ChickenType = "Chicken6", Weight = 9 },
+                { ChickenType = "Chicken11", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 700,
                 Acceleration = 150, MaxSpeed = 1319, KeepDistance = 0,
@@ -504,11 +617,11 @@ local GameConfig = {
         {
             RegionId = 4, Enabled = true, RegionRootId = 1060, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken3", Weight = 50 },
-                { ChickenType = "Chicken4", Weight = 30 },
-                { ChickenType = "Chicken5", Weight = 10 },
-                { ChickenType = "Chicken6", Weight = 9 },
-                { ChickenType = "Chicken10", Weight = 1 },
+                { ChickenType = "Chicken4", Weight = 50 },
+                { ChickenType = "Chicken5", Weight = 30 },
+                { ChickenType = "Chicken6", Weight = 10 },
+                { ChickenType = "Chicken7", Weight = 9 },
+                { ChickenType = "Chicken12", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 800,
                 Acceleration = 150, MaxSpeed = 1595, KeepDistance = 0,
@@ -517,11 +630,11 @@ local GameConfig = {
         {
             RegionId = 5, Enabled = true, RegionRootId = 1075, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken3", Weight = 50 },
-                { ChickenType = "Chicken4", Weight = 30 },
-                { ChickenType = "Chicken5", Weight = 10 },
-                { ChickenType = "Chicken6", Weight = 9 },
-                { ChickenType = "Chicken11", Weight = 1 },
+                { ChickenType = "Chicken5", Weight = 50 },
+                { ChickenType = "Chicken6", Weight = 30 },
+                { ChickenType = "Chicken7", Weight = 10 },
+                { ChickenType = "Chicken8", Weight = 9 },
+                { ChickenType = "Chicken13", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 900,
                 Acceleration = 150, MaxSpeed = 1861, KeepDistance = 0,
@@ -530,11 +643,11 @@ local GameConfig = {
         {
             RegionId = 6, Enabled = true, RegionRootId = 1090, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken4", Weight = 50 },
-                { ChickenType = "Chicken5", Weight = 30 },
-                { ChickenType = "Chicken6", Weight = 10 },
-                { ChickenType = "Chicken7", Weight = 9 },
-                { ChickenType = "Chicken11", Weight = 1 },
+                { ChickenType = "Chicken7", Weight = 50 },
+                { ChickenType = "Chicken8", Weight = 30 },
+                { ChickenType = "Chicken9", Weight = 10 },
+                { ChickenType = "Chicken10", Weight = 9 },
+                { ChickenType = "Chicken15", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1000,
                 Acceleration = 150, MaxSpeed = 2063, KeepDistance = 0,
@@ -543,11 +656,11 @@ local GameConfig = {
         {
             RegionId = 7, Enabled = true, RegionRootId = 1105, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken4", Weight = 50 },
-                { ChickenType = "Chicken5", Weight = 30 },
-                { ChickenType = "Chicken6", Weight = 10 },
-                { ChickenType = "Chicken7", Weight = 9 },
-                { ChickenType = "Chicken12", Weight = 1 },
+                { ChickenType = "Chicken9", Weight = 50 },
+                { ChickenType = "Chicken10", Weight = 30 },
+                { ChickenType = "Chicken11", Weight = 10 },
+                { ChickenType = "Chicken12", Weight = 9 },
+                { ChickenType = "Chicken17", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1100,
                 Acceleration = 150, MaxSpeed = 2247, KeepDistance = 0,
@@ -556,11 +669,11 @@ local GameConfig = {
         {
             RegionId = 8, Enabled = true, RegionRootId = 1120, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken5", Weight = 50 },
-                { ChickenType = "Chicken6", Weight = 30 },
-                { ChickenType = "Chicken7", Weight = 10 },
-                { ChickenType = "Chicken8", Weight = 9 },
-                { ChickenType = "Chicken12", Weight = 1 },
+                { ChickenType = "Chicken11", Weight = 50 },
+                { ChickenType = "Chicken12", Weight = 30 },
+                { ChickenType = "Chicken13", Weight = 10 },
+                { ChickenType = "Chicken14", Weight = 9 },
+                { ChickenType = "Chicken19", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1200,
                 Acceleration = 150, MaxSpeed = 2434, KeepDistance = 0,
@@ -569,11 +682,11 @@ local GameConfig = {
         {
             RegionId = 9, Enabled = true, RegionRootId = 1135, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken6", Weight = 50 },
-                { ChickenType = "Chicken7", Weight = 30 },
-                { ChickenType = "Chicken8", Weight = 10 },
-                { ChickenType = "Chicken9", Weight = 9 },
-                { ChickenType = "Chicken13", Weight = 1 },
+                { ChickenType = "Chicken13", Weight = 50 },
+                { ChickenType = "Chicken14", Weight = 30 },
+                { ChickenType = "Chicken15", Weight = 10 },
+                { ChickenType = "Chicken16", Weight = 9 },
+                { ChickenType = "Chicken21", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1300,
                 Acceleration = 150, MaxSpeed = 2622, KeepDistance = 0,
@@ -582,11 +695,11 @@ local GameConfig = {
         {
             RegionId = 10, Enabled = true, RegionRootId = 1150, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken7", Weight = 50 },
-                { ChickenType = "Chicken8", Weight = 30 },
-                { ChickenType = "Chicken9", Weight = 10 },
-                { ChickenType = "Chicken10", Weight = 9 },
-                { ChickenType = "Chicken14", Weight = 1 },
+                { ChickenType = "Chicken15", Weight = 50 },
+                { ChickenType = "Chicken16", Weight = 30 },
+                { ChickenType = "Chicken17", Weight = 10 },
+                { ChickenType = "Chicken18", Weight = 9 },
+                { ChickenType = "Chicken23", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1400,
                 Acceleration = 150, MaxSpeed = 2801, KeepDistance = 0,
@@ -595,11 +708,11 @@ local GameConfig = {
         {
             RegionId = 11, Enabled = true, RegionRootId = 1165, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken8", Weight = 50 },
-                { ChickenType = "Chicken9", Weight = 30 },
-                { ChickenType = "Chicken10", Weight = 10 },
-                { ChickenType = "Chicken11", Weight = 9 },
-                { ChickenType = "Chicken15", Weight = 1 },
+                { ChickenType = "Chicken17", Weight = 50 },
+                { ChickenType = "Chicken18", Weight = 30 },
+                { ChickenType = "Chicken19", Weight = 10 },
+                { ChickenType = "Chicken20", Weight = 9 },
+                { ChickenType = "Chicken24", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1500,
                 Acceleration = 150, MaxSpeed = 2973, KeepDistance = 0,
@@ -608,11 +721,11 @@ local GameConfig = {
         {
             RegionId = 12, Enabled = true, RegionRootId = 1180, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken9", Weight = 50 },
-                { ChickenType = "Chicken10", Weight = 30 },
-                { ChickenType = "Chicken11", Weight = 10 },
-                { ChickenType = "Chicken12", Weight = 9 },
-                { ChickenType = "Chicken16", Weight = 1 },
+                { ChickenType = "Chicken18", Weight = 50 },
+                { ChickenType = "Chicken19", Weight = 30 },
+                { ChickenType = "Chicken20", Weight = 10 },
+                { ChickenType = "Chicken21", Weight = 9 },
+                { ChickenType = "Chicken25", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1600,
                 Acceleration = 150, MaxSpeed = 3125, KeepDistance = 0,
@@ -621,11 +734,11 @@ local GameConfig = {
         {
             RegionId = 13, Enabled = true, RegionRootId = 1195, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken10", Weight = 50 },
-                { ChickenType = "Chicken11", Weight = 30 },
-                { ChickenType = "Chicken12", Weight = 10 },
-                { ChickenType = "Chicken13", Weight = 9 },
-                { ChickenType = "Chicken17", Weight = 1 },
+                { ChickenType = "Chicken20", Weight = 50 },
+                { ChickenType = "Chicken21", Weight = 30 },
+                { ChickenType = "Chicken22", Weight = 10 },
+                { ChickenType = "Chicken23", Weight = 9 },
+                { ChickenType = "Chicken26", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1700,
                 Acceleration = 150, MaxSpeed = 3254, KeepDistance = 0,
@@ -634,11 +747,11 @@ local GameConfig = {
         {
             RegionId = 14, Enabled = true, RegionRootId = 1210, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken11", Weight = 50 },
-                { ChickenType = "Chicken12", Weight = 30 },
-                { ChickenType = "Chicken13", Weight = 10 },
-                { ChickenType = "Chicken14", Weight = 9 },
-                { ChickenType = "Chicken18", Weight = 1 },
+                { ChickenType = "Chicken21", Weight = 50 },
+                { ChickenType = "Chicken22", Weight = 30 },
+                { ChickenType = "Chicken23", Weight = 10 },
+                { ChickenType = "Chicken24", Weight = 9 },
+                { ChickenType = "Chicken26", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1800,
                 Acceleration = 150, MaxSpeed = 3376, KeepDistance = 0,
@@ -647,79 +760,14 @@ local GameConfig = {
         {
             RegionId = 15, Enabled = true, RegionRootId = 1225, SpawnPointCount = 5,
             ChickenPool = {
-                { ChickenType = "Chicken12", Weight = 50 },
-                { ChickenType = "Chicken13", Weight = 30 },
-                { ChickenType = "Chicken14", Weight = 10 },
-                { ChickenType = "Chicken15", Weight = 9 },
-                { ChickenType = "Chicken19", Weight = 1 },
+                { ChickenType = "Chicken22", Weight = 50 },
+                { ChickenType = "Chicken23", Weight = 30 },
+                { ChickenType = "Chicken24", Weight = 10 },
+                { ChickenType = "Chicken25", Weight = 9 },
+                { ChickenType = "Chicken26", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1900,
                 Acceleration = 150, MaxSpeed = 3486, KeepDistance = 0,
-                KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
-        },
-        {
-            RegionId = 16, Enabled = true, RegionRootId = 1240, SpawnPointCount = 5,
-            ChickenPool = {
-                { ChickenType = "Chicken13", Weight = 50 },
-                { ChickenType = "Chicken14", Weight = 30 },
-                { ChickenType = "Chicken15", Weight = 10 },
-                { ChickenType = "Chicken16", Weight = 9 },
-                { ChickenType = "Chicken20", Weight = 1 },
-            },
-            Guardian = { TrackDelaySeconds = 3, InitialSpeed = 2000,
-                Acceleration = 150, MaxSpeed = 3595, KeepDistance = 0,
-                KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
-        },
-        {
-            RegionId = 17, Enabled = true, RegionRootId = 1255, SpawnPointCount = 5,
-            ChickenPool = {
-                { ChickenType = "Chicken14", Weight = 50 },
-                { ChickenType = "Chicken15", Weight = 30 },
-                { ChickenType = "Chicken16", Weight = 10 },
-                { ChickenType = "Chicken17", Weight = 9 },
-                { ChickenType = "Chicken20", Weight = 1 },
-            },
-            Guardian = { TrackDelaySeconds = 3, InitialSpeed = 2100,
-                Acceleration = 150, MaxSpeed = 3704, KeepDistance = 0,
-                KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
-        },
-        {
-            RegionId = 18, Enabled = true, RegionRootId = 1270, SpawnPointCount = 5,
-            ChickenPool = {
-                { ChickenType = "Chicken15", Weight = 50 },
-                { ChickenType = "Chicken16", Weight = 30 },
-                { ChickenType = "Chicken17", Weight = 10 },
-                { ChickenType = "Chicken18", Weight = 9 },
-                { ChickenType = "Chicken20", Weight = 1 },
-            },
-            Guardian = { TrackDelaySeconds = 3, InitialSpeed = 2200,
-                Acceleration = 150, MaxSpeed = 3811, KeepDistance = 0,
-                KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
-        },
-        {
-            RegionId = 19, Enabled = true, RegionRootId = 1285, SpawnPointCount = 5,
-            ChickenPool = {
-                { ChickenType = "Chicken16", Weight = 50 },
-                { ChickenType = "Chicken17", Weight = 30 },
-                { ChickenType = "Chicken18", Weight = 10 },
-                { ChickenType = "Chicken19", Weight = 9 },
-                { ChickenType = "Chicken20", Weight = 1 },
-            },
-            Guardian = { TrackDelaySeconds = 3, InitialSpeed = 2300,
-                Acceleration = 150, MaxSpeed = 3906, KeepDistance = 0,
-                KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
-        },
-        {
-            RegionId = 20, Enabled = true, RegionRootId = 1300, SpawnPointCount = 5,
-            ChickenPool = {
-                { ChickenType = "Chicken17", Weight = 50 },
-                { ChickenType = "Chicken18", Weight = 30 },
-                { ChickenType = "Chicken18", Weight = 10 },
-                { ChickenType = "Chicken19", Weight = 8 },
-                { ChickenType = "Chicken20", Weight = 2 },
-            },
-            Guardian = { TrackDelaySeconds = 3, InitialSpeed = 2400,
-                Acceleration = 150, MaxSpeed = 4000, KeepDistance = 0,
                 KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
         },
     },

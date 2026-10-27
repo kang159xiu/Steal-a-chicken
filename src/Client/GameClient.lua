@@ -1,6 +1,8 @@
 local GuardianDiagnosticController = require "Client.Controllers.GuardianDiagnosticController"
 local GameConfig = require "Common.Config.GameConfig"
+local ChickenValueController = require "Client.Controllers.ChickenValueController"
 local PersistenceController = require "Client.Controllers.PersistenceController"
+local PromptController = require "Client.Controllers.PromptController"
 local RefreshController = require "Client.Controllers.RefreshController"
 local FeatureFlags = require "Common.Config.FeatureFlags"
 local NetMsg = require "Common.NetMsg"
@@ -9,6 +11,7 @@ local EventBus = require "Common.Core.EventBus"
 local TimerRegistry = require "Common.Core.TimerRegistry"
 local ModuleManager = require "Common.Core.ModuleManager"
 local ElementCopyTest = require "Common.Debug.ElementCopyTest"
+local GuideLineTest = require "Client.Debug.GuideLineTest"
 local GuardianTrackTest = require "Common.Debug.GuardianTrackTest"
 local CharacterBindingTest = require "Common.Debug.CharacterBindingTest"
 local GuardianCarryIntegrationTest = require "Common.Debug.GuardianCarryIntegrationTest"
@@ -26,6 +29,8 @@ local HomeCountController = require "Client.Controllers.HomeCountController"
 local HomeUpgradeController = require "Client.Controllers.HomeUpgradeController"
 local TreadmillController = require "Client.Controllers.TreadmillController"
 local RebirthController = require "Client.Controllers.RebirthController"
+local MultiplierPurchaseController = require "Client.Controllers.MultiplierPurchaseController"
+local TrackShopController = require "Client.Controllers.TrackShopController"
 local EggGrowthController = require "Client.Controllers.EggGrowthController"
 local EggCollectionController = require "Client.Controllers.EggCollectionController"
 local EggCollectionListController = require "Client.Controllers.EggCollectionListController"
@@ -61,6 +66,7 @@ function GameClient:Init()
     self.Context = CreateClientContext()
 
     self.Context.Manager:Register(ElementCopyTest)
+    self.Context.Manager:Register(GuideLineTest)
     self.Context.Manager:Register(GuardianTrackTest)
     self.Context.Manager:Register(CharacterBindingTest)
     self.Context.Manager:Register(GuardianCarryIntegrationTest)
@@ -70,9 +76,11 @@ function GameClient:Init()
     self.Context.Manager:Register(AvatarPictureBoardTest)
     self.Context.Manager:Register(AvatarReadTest)
     if FeatureFlags.Values.Guardian then self.Context.Manager:Register(GuardianDiagnosticController) end
+    self.Context.Manager:Register(PromptController)
     self.Context.Manager:Register(PersistenceController)
     self.Context.Manager:Register(PickupController)
     self.Context.Manager:Register(HotbarController)
+    self.Context.Manager:Register(ChickenValueController)
     self.Context.Manager:Register(SellShopController)
     self.Context.Manager:Register(PlacementController)
     self.Context.Manager:Register(HomeNameController)
@@ -80,6 +88,8 @@ function GameClient:Init()
     self.Context.Manager:Register(HomeUpgradeController)
     self.Context.Manager:Register(TreadmillController)
     self.Context.Manager:Register(RebirthController)
+    self.Context.Manager:Register(MultiplierPurchaseController)
+    self.Context.Manager:Register(TrackShopController)
     self.Context.Manager:Register(EggGrowthController)
     self.Context.Manager:Register(EggCollectionController)
     self.Context.Manager:Register(EggCollectionListController)

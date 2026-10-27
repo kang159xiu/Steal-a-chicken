@@ -12,7 +12,7 @@ local function Keys(prefix, separator, segmentCount)
 end
 function PersistenceService:ValidateConfig()
     local c = Config.Persistence
-    if c.ProbeSegmentCount ~= 25 or c.ProbePaddingLength ~= 48000 or c.SegmentCount ~= 14 or c.ValueLimit ~= 2048 or c.SegmentPayload ~= 1980
+    if c.SaveIntervalSeconds ~= 10 or c.ProbeSegmentCount ~= 25 or c.ProbePaddingLength ~= 48000 or c.SegmentCount ~= 14 or c.ValueLimit ~= 2048 or c.SegmentPayload ~= 1980
         or c.ProductionPrefix == c.ProbePrefix or not c.ProductionPrefix:match("^[A-Z0-9_]+$")
         or not c.ProbePrefix:match("^[A-Z0-9_]+$") or (c.ProbeMode ~= "read" and c.ProbeMode ~= "write") then
         return false, { "Persistence分段/Key/验证模式配置无效" }
@@ -371,6 +371,7 @@ function PersistenceService:Start(context)
                 Status(record, record.leaveExportError and "leave_export_failed" or (record.frozen and "left_saved" or "ready"), record.leaveExportError or reason)
             else
                 record.saveFinalAfterCurrent = nil
+                record.failedVersion = capturedVersion
                 Status(record, record.frozen and "leave_save_failed" or "save_failed", reason)
             end
             if ok and record.saveFinalAfterCurrent then
@@ -380,7 +381,8 @@ function PersistenceService:Start(context)
             end
             if completed then completed(ok and not record.leaveExportError, record.leaveExportError or reason) end
             if productionStates[record.playerId] ~= record then return end
-            if ok and not record.frozen and record.changeVersion ~= record.savedVersion then QueueSave(record) end
+            -- 普通写中变化留到下一周期；只有未包含的关键请求才在完成后追加。
+            if ok and not record.frozen and record.immediateVersion > record.savedVersion then QueueSave(record) end
             if record.nextLoad then
                 record.nextLoad = nil
                 if ok and not record.leaveExportError then runtime:LoadPlayer(record.playerId, true)
@@ -397,7 +399,7 @@ function PersistenceService:Start(context)
         if record.saving then return true, "save_already_running_dirty_retained" end
         if record.changeVersion == record.savedVersion then return true, "unchanged" end
         local text, reason = ExportRecord(record)
-        if not text then Status(record, "save_failed", reason); return false, reason end
+        if not text then record.failedVersion = record.changeVersion; Status(record, "save_failed", reason); return false, reason end
         record.pendingText, record.pendingVersion = text, record.changeVersion
         return SaveRecord(record)
     end
@@ -405,8 +407,16 @@ function PersistenceService:Start(context)
         if not self:IsReady(playerId) then return false, "player_not_ready" end
         local record = productionStates[playerId]
         record.changeVersion = record.changeVersion + 1
+        record.immediateVersion = record.changeVersion
         record.dirtyReason = reason
         QueueSave(record) -- 合并本次无等待事务的全部业务通知后再导出。
+        return true
+    end
+    function runtime:MarkDeferred(playerId, reason)
+        if not self:IsReady(playerId) then return false, "player_not_ready" end
+        local record = productionStates[playerId]
+        record.changeVersion = record.changeVersion + 1
+        record.dirtyReason = reason
         return true
     end
     function runtime:PrepareLeave(playerId)
@@ -456,7 +466,8 @@ function PersistenceService:Start(context)
         elseif previous and (previous.loading or previous.ready) then return true, "session_already_loading_or_ready" end
         local generation, beginError = self:BeginSession(playerId, true)
         if not generation then return false, beginError end
-        local record = { playerId = playerId, generation = generation, loading = true, ready = false, changeVersion = 0, savedVersion = 0 }
+        local record = { playerId = playerId, generation = generation, loading = true, ready = false,
+            changeVersion = 0, savedVersion = 0, immediateVersion = 0 }
         local archiveSession = runtime.Sessions[playerId]
         productionStates[playerId] = record
         Status(record, "loading", "archive_read")
@@ -521,9 +532,19 @@ function PersistenceService:Start(context)
     if c.ProductionEnabled then
         for _, eventName in ipairs({ "InventoryChanged", "EconomyChanged" }) do
             context.Events:Subscribe(self.Name, eventName, function(event)
-                runtime:MarkDirty(event.playerId, eventName)
+                runtime:MarkDeferred(event.playerId, eventName)
             end)
         end
+        context.Timers:AddLoopTimer(self.Name, c.SaveIntervalSeconds, function()
+            if not Active() then return end
+            for playerId, record in pairs(productionStates) do
+                if runtime:IsReady(playerId) and not record.saving and not record.saveTimer
+                    and record.changeVersion ~= record.savedVersion
+                    and (not record.failedVersion or record.changeVersion > record.failedVersion) then
+                    runtime:RequestSave(playerId)
+                end
+            end
+        end)
         context.Timers:AddTimer(self.Name, Config.Runtime.ServerReadyDelaySeconds, function() if Active() then startupReady = true end end)
         context.Events:Subscribe(self.Name, "HomeTeleportCalled", function(event)
             local home = context.Services.HomeService

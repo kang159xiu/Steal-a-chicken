@@ -1,4 +1,5 @@
 local GameConfig = require "Common.Config.GameConfig"
+local Decimal = require "Common.DecimalInteger"
 
 local PlacementService = {
     Name = "PlacementService",
@@ -7,6 +8,10 @@ local PlacementService = {
 }
 local function IsPositiveInteger(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
+end
+
+local function CopyChicken(chicken)
+    return { itemId = chicken.itemId, typeId = chicken.typeId, sequence = chicken.sequence, finalSellPrice = chicken.finalSellPrice }
 end
 
 local function InRange(playerId, elementId, positionReadFailures)
@@ -77,7 +82,7 @@ function PlacementService:Start(context)
             for slotIndex, record in pairs(house.slots) do
                 local chicken = record.chicken
                 snapshot.slots[#snapshot.slots + 1] = { slotIndex = slotIndex, rootId = record.rootId,
-                    chicken = { itemId = chicken.itemId, typeId = chicken.typeId, sequence = chicken.sequence } }
+                    chicken = CopyChicken(chicken) }
             end
             table.sort(snapshot.slots, function(a, b) return a.slotIndex < b.slotIndex end)
         end
@@ -94,7 +99,28 @@ function PlacementService:Start(context)
         return GameConfig.Home.DefaultChickenCapacity
     end
 
+    local modelVersion = 0
+    local function SendModels(playerId, homeId, recipient, cleared)
+        local house = not cleared and runtime.Homes[homeId] or nil
+        local models = {}
+        if house and house.playerId == playerId then
+            for _, record in pairs(house.slots) do
+                models[#models + 1] = { rootId = record.rootId, finalSellPrice = record.chicken.finalSellPrice,
+                    chickenType = record.chicken.typeId }
+            end
+        end
+        modelVersion = modelVersion + 1
+        local message = { source = "placement", playerId = playerId, version = modelVersion, models = models }
+        if recipient then System:SendToClient(recipient, context.NetMsg.Messages.ChickenModelState, message)
+        else System:SendToAllClients(context.NetMsg.Messages.ChickenModelState, message) end
+    end
+    runtime.ModelSnapshotCallback = function(_, _, playerId)
+        if not Active() or not runtime.Ready or not IsPositiveInteger(playerId) then return end
+        for homeId, house in pairs(runtime.Homes) do SendModels(house.playerId, homeId, playerId) end
+    end
+    System:BindNotify(context.NetMsg.Messages.ChickenModelSnapshotRequest, runtime.ModelSnapshotCallback)
     local function PublishPlaced(playerId, homeId, cleared)
+        SendModels(playerId, homeId, nil, cleared)
         if not cleared and CanPlay(playerId) and persistence then persistence:MarkDirty(playerId, "placement") end
         local snapshot = not cleared and runtime:GetPlacedSnapshot(playerId)
             or { playerId = playerId, homeId = homeId, count = 0, slots = {} }
@@ -227,7 +253,7 @@ function PlacementService:Start(context)
             or Occupant(target) ~= operation.previous then return false end
         local item = SelectedChicken(operation.playerId)
         if not item then return false end
-        for _, field in ipairs({ "itemId", "kind", "typeId", "displayName", "count", "iconIndex", "sequence" }) do
+        for _, field in ipairs({ "itemId", "kind", "typeId", "displayName", "count", "iconIndex", "sequence", "finalSellPrice" }) do
             if item[field] ~= operation.item[field] then return false end
         end
         return SlotUnlocked(operation.playerId, target.slotIndex)
@@ -396,6 +422,7 @@ function PlacementService:Start(context)
                     return
                 end
                 Protect(function()
+                    Element:SetEnableCollision(operation.rootId, false)
                     Element:SetRotation(operation.rootId, rotation, Element.COORDINATE.World)
                     context.Timers:AddFrame(PlacementService.Name, GameConfig.Runtime.EngineOperationDelayFrames,
                         Protect(function() CommitPlacement(operation) end))
@@ -435,13 +462,22 @@ function PlacementService:Start(context)
                 local rows = {}
                 for _, slot in ipairs(snapshot.slots) do
                     local item = slot.chicken
-                    rows[#rows + 1] = { slot.slotIndex, item.itemId, item.typeId, item.sequence }
+                    if not Decimal.FromSafeInteger(item.finalSellPrice) then return nil, "invalid_placed_chicken_price" end
+                    rows[#rows + 1] = { slot.slotIndex, item.itemId, item.typeId, item.sequence, item.finalSellPrice }
                 end
-                return { version = 1, slots = rows }
+                return { version = 2, slots = rows }
             end,
             Restore = function(id, data, done)
-                if data == nil then data = { version = 1, slots = {} } end
-                if data.version ~= 1 or type(data.slots) ~= "table" or #data.slots > ChickenCapacity(id) then done(false, "invalid_placement_snapshot"); return end
+                -- nil仅是协调器定义的新玩家；旧版本/缺价格一律拒绝，不补档。
+                if data == nil then
+                    local homeId = home:GetPlayerHome(id)
+                    if not homeId then done(false, "home_missing"); return end
+                    ClearHome(id, homeId)
+                    runtime.Homes[homeId] = { playerId = id, slots = {}, count = 0 }
+                    done(true, function() PublishPlaced(id, homeId); return true end)
+                    return
+                end
+                if type(data) ~= "table" or data.version ~= 2 or type(data.slots) ~= "table" or #data.slots > ChickenCapacity(id) then done(false, "invalid_placement_snapshot"); return end
                 local homeId = home:GetPlayerHome(id)
                 if not homeId then done(false, "home_missing"); return end
                 local generation = inventory:GetSessionGeneration(id)
@@ -460,7 +496,7 @@ function PlacementService:Start(context)
                 end
                 if count ~= #data.slots then done(false, "invalid_placement_rows"); return end
                 for _, row in ipairs(data.slots) do
-                    if type(row) ~= "table" or #row ~= 4 or not IsPositiveInteger(row[1]) or not slotElements[row[1]]
+                    if type(row) ~= "table" or #row ~= 5 or not Decimal.FromSafeInteger(row[5]) or not IsPositiveInteger(row[1]) or not slotElements[row[1]]
                         or type(row[2]) ~= "string" or type(row[3]) ~= "string" or not IsPositiveInteger(row[4])
                         or row[4] > inv.sequenceHighWater or not SlotUnlocked(id, row[1]) or usedIds[row[2]] or usedSequences[row[4]] or usedSlots[row[1]] then
                         done(false, "invalid_placement_identity"); return
@@ -472,7 +508,7 @@ function PlacementService:Start(context)
                     end
                     usedIds[row[2]], usedSequences[row[4]], usedSlots[row[1]] = true, true, true
                     rows[#rows + 1] = { slot = row[1], elementId = slotElements[row[1]], config = config,
-                        item = { itemId = row[2], kind = "Chicken", typeId = row[3], sequence = row[4], count = 1,
+                        item = { itemId = row[2], kind = "Chicken", typeId = row[3], sequence = row[4], finalSellPrice = row[5], count = 1,
                             displayName = config.DisplayName, iconIndex = config.ChickenIconIndex } }
                 end
                 ClearHome(id, homeId)
@@ -505,7 +541,10 @@ function PlacementService:Start(context)
                         context.ElementCopy:CopyTree(row.config.TemplateRootId, position, "RestorePlacement:" .. tostring(id), function(result)
                             if not result.success then Fail(result.reason); return end
                             if not Valid() then DestroyRoot(result.rootId, "late_restore"); return end
-                            local rotated, why = pcall(function() Element:SetRotation(result.rootId, rotation, Element.COORDINATE.World) end)
+                            local rotated, why = pcall(function()
+                                Element:SetEnableCollision(result.rootId, false)
+                                Element:SetRotation(result.rootId, rotation, Element.COORDINATE.World)
+                            end)
                             if not rotated then DestroyRoot(result.rootId, "restore_rotation_failed"); Fail(why); return end
                             -- 将完整树登记到待恢复house，离开/Stop在两帧等待期间也能清理。
                             house.slots[row.slot] = { chicken = row.item, rootId = result.rootId }
@@ -586,6 +625,7 @@ function PlacementService:Stop(context)
     if not runtime then return end
     runtime.Cleanup()
     context.Services.PlacementService = nil
+    System:UnbindNotify(context.NetMsg.Messages.ChickenModelSnapshotRequest, runtime.ModelSnapshotCallback)
     System:UnregisterEvent(Events.ON_ELEMENT_TOUCH_PLAYER, runtime.TouchCallback)
     System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.PreleaveCallback)
     System:UnbindNotify(context.NetMsg.Messages.PlacementAction, runtime.ActionCallback)

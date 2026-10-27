@@ -21,6 +21,9 @@ local HomeUpgradeService = require "Server.Services.HomeUpgradeService"
 local PlayerSpeedService = require "Server.Services.PlayerSpeedService"
 local TreadmillService = require "Server.Services.TreadmillService"
 local RebirthService = require "Server.Services.RebirthService"
+local PurchaseService = require "Server.Services.PurchaseService"
+local MultiplierPurchaseService = require "Server.Services.MultiplierPurchaseService"
+local TrackShopService = require "Server.Services.TrackShopService"
 local PlacementService = require "Server.Services.PlacementService"
 local EggProductionService = require "Server.Services.EggProductionService"
 local EggCollectionService = require "Server.Services.EggCollectionService"
@@ -77,7 +80,10 @@ function GameServer:Init()
     self.Context.Manager:Register(EconomyService)
     self.Context.Manager:Register(PlayerSpeedService)
     self.Context.Manager:Register(TreadmillService)
+    self.Context.Manager:Register(PurchaseService)
     self.Context.Manager:Register(RebirthService)
+    self.Context.Manager:Register(MultiplierPurchaseService)
+    self.Context.Manager:Register(TrackShopService)
     self.Context.Manager:Register(HomeUpgradeService)
     self.Context.Manager:Register(SellShopService)
     self.Context.Manager:Register(HotbarService)

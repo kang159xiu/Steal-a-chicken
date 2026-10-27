@@ -3,7 +3,7 @@ local GameConfig = require "Common.Config.GameConfig"
 local PickupController = {
     Name = "PickupController",
     FeatureFlag = "Theft",
-    Dependencies = {},
+    Dependencies = { "PromptController" },
 }
 
 local function IsPositiveInteger(value)
@@ -148,13 +148,13 @@ function PickupController:Start(context)
             if message.carryRetained then
                 if rootId ~= runtime.CarryRootId or message.operation ~= runtime.CarryOperation then return end
                 if message.reason == "inventory_capacity_full" then
-                    UI:ShowMessageTip("库存已满，请先卖出")
+                    context.Services.PromptController:Show("鸡库存已满，请先出售或放置")
                 end
                 return
             end
             if rootId ~= runtime.TargetElementId then return end
             if not message.success and message.operation ~= runtime.TargetOperation then return end
-            if message.reason == "inventory_capacity_full" then UI:ShowMessageTip("库存已满，请先卖出") end
+            if message.reason == "inventory_capacity_full" then context.Services.PromptController:Show("鸡库存已满，请先出售或放置") end
             HideInteraction()
             Log:PrintLog("[PickupController] 收到正式拾取结果",
                 "success:", tostring(message.success),

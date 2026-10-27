@@ -51,7 +51,8 @@ function Decimal.Format(value)
             local cents = value:sub(1, integerLength + 2)
             local roundingDigit = value:byte(integerLength + 3)
             if roundingDigit and roundingDigit >= 53 then cents = Decimal.Add(cents, "1") end
-            return cents:sub(1, -3) .. "." .. cents:sub(-2) .. suffix
+            local fraction = cents:sub(-2)
+            return cents:sub(1, -3) .. (fraction == "00" and "" or "." .. fraction) .. suffix
         end
     end
     return value

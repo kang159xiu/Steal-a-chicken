@@ -10,6 +10,24 @@ local function IsPositiveInteger(value)
     return type(value) == "number" and value > 0 and value == math.floor(value)
 end
 
+-- 个体历史售价只接受可精确保存/结算的非负整数；不从当前类型配置补价。
+local function IsSellPrice(value)
+    return type(value) == "number" and value >= 0 and value <= 9007199254740991
+        and value == math.floor(value)
+end
+
+-- itemId中的末段本来就是sequence的规范十进制文本；恢复前验证安全整数及无损往返。
+local function ItemSequence(itemId, kind)
+    if type(itemId) ~= "string" then return nil end
+    local prefix = kind == "C" and "chicken" or "egg"
+    local owner, text = itemId:match("^" .. prefix .. ":([1-9][0-9]*):([1-9][0-9]*)$")
+    if not owner then return nil end
+    local sequence = tonumber(text)
+    if not IsPositiveInteger(sequence) or sequence > 9007199254740991
+        or string.format("%.0f", sequence) ~= text then return nil end
+    return sequence
+end
+
 local function CopyItem(item)
     if not item then return nil end
     return {
@@ -175,20 +193,26 @@ function InventoryService:Start(context)
         if count - removeCount + addCount > limit then return false, "inventory_capacity_full" end
         return true
     end
-    -- 紧凑行：itemId/C或E/typeId/sequence；蛋追加历史来源/baseSellPrice/finalScaleUnits/finalSellPrice。
+    -- 库存v2紧凑行：鸡为itemId/C/typeId/finalSellPrice；蛋为itemId/E/typeId/来源/基础价/缩放整数档/最终价。
+    -- sequence从itemId无损还原，不重复保存；sequenceHighWater仍保留供放置档及后续身份分配使用。
     -- 显示名称、图标、count按配置重建；sourceEggId仅历史来源，不作跨局场景查找。
     -- finalScale由原整数档/100无损重建，避免编码浮点。
     function runtime:ExportSnapshot(playerId, generation)
         if generation == nil or self:GetSessionGeneration(playerId) ~= generation then return nil, "stale_inventory_session" end
         local rows = {}
         for _, item in ipairs(self:GetSnapshot(playerId)) do
-            local row = { item.itemId, item.kind == "Chicken" and "C" or "E", item.typeId, item.sequence }
-            if item.kind == "Egg" then
-                row[5], row[6], row[7], row[8] = item.sourceEggId, item.baseSellPrice, item.finalScaleUnits, item.finalSellPrice
+            local kind = item.kind == "Chicken" and "C" or "E"
+            if ItemSequence(item.itemId, kind) ~= item.sequence then return nil, "invalid_item_identity" end
+            local row = { item.itemId, kind, item.typeId }
+            if item.kind == "Chicken" then
+                if not IsSellPrice(item.finalSellPrice) then return nil, "invalid_chicken_price" end
+                row[4] = item.finalSellPrice
+            elseif item.kind == "Egg" then
+                row[4], row[5], row[6], row[7] = item.sourceEggId, item.baseSellPrice, item.finalScaleUnits, item.finalSellPrice
             end
             rows[#rows + 1] = row
         end
-        return { version = 1, sequenceHighWater = self.GlobalSequence, items = rows }
+        return { version = 2, sequenceHighWater = self.GlobalSequence, items = rows }
     end
     function runtime:RestoreSnapshot(playerId, generation, snapshot)
         if generation == nil or self:GetSessionGeneration(playerId) ~= generation then return false, "stale_inventory_session" end
@@ -202,7 +226,7 @@ function InventoryService:Start(context)
             end
             return count == #array
         end
-        if type(snapshot) ~= "table" or snapshot.version ~= 1 or type(snapshot.items) ~= "table"
+        if type(snapshot) ~= "table" or snapshot.version ~= 2 or type(snapshot.items) ~= "table"
             or not Dense(snapshot.items)
             or type(snapshot.sequenceHighWater) ~= "number" or snapshot.sequenceHighWater < 0
             or snapshot.sequenceHighWater > 9007199254740991 or snapshot.sequenceHighWater ~= math.floor(snapshot.sequenceHighWater) then
@@ -216,23 +240,23 @@ function InventoryService:Start(context)
         end
         for _, row in ipairs(snapshot.items) do
             if not Dense(row) or (row[2] ~= "C" and row[2] ~= "E") or type(row[1]) ~= "string"
-                or type(row[3]) ~= "string" or not Safe(row[4], 1) or row[4] > snapshot.sequenceHighWater
-                or ids[row[1]] or sequences[row[4]] then return false, "invalid_inventory_snapshot" end
-            local prefix = row[2] == "C" and "chicken" or "egg"
-            local owner, sequence = row[1]:match("^" .. prefix .. ":([1-9][0-9]*):([1-9][0-9]*)$")
-            if not owner or sequence ~= string.format("%.0f", row[4]) then return false, "invalid_item_identity" end
-            local item = { itemId = row[1], kind = row[2] == "C" and "Chicken" or "Egg", typeId = row[3], count = 1, sequence = row[4] }
+                or type(row[3]) ~= "string" or ids[row[1]] then return false, "invalid_inventory_snapshot" end
+            local sequence = ItemSequence(row[1], row[2])
+            if not sequence or sequence > snapshot.sequenceHighWater or sequences[sequence] then return false, "invalid_item_identity" end
+            local item = { itemId = row[1], kind = row[2] == "C" and "Chicken" or "Egg", typeId = row[3], count = 1, sequence = sequence }
             if item.kind == "Chicken" then
                 local config = GameConfig.ChickenTypes[item.typeId]
-                if #row ~= 4 or not config or not Safe(config.ChickenIconIndex, 1) then return false, "invalid_inventory_snapshot" end
+                if #row ~= 4 or not config or not Safe(config.ChickenIconIndex, 1)
+                    or not IsSellPrice(row[4]) then return false, "invalid_inventory_snapshot" end
+                item.finalSellPrice = row[4]
                 item.displayName, item.iconIndex = config.DisplayName, config.ChickenIconIndex
                 data.Chickens[item.itemId] = item; data.ChickenOrder[#data.ChickenOrder + 1] = item.itemId
             else
                 local _, _, egg = FindEggConfig(item.typeId)
-                if #row ~= 8 or not egg or not Safe(egg.IconIndex, 1) or not Safe(row[5], 1) or not Safe(row[6], 0)
-                    or not Safe(row[7], 1) or not Safe(row[8], 0) then return false, "invalid_inventory_snapshot" end
+                if #row ~= 7 or not egg or not Safe(egg.IconIndex, 1) or not Safe(row[4], 1) or not Safe(row[5], 0)
+                    or not Safe(row[6], 1) or not Safe(row[7], 0) then return false, "invalid_inventory_snapshot" end
                 item.displayName, item.iconIndex = item.typeId, egg.IconIndex
-                item.sourceEggId, item.baseSellPrice, item.finalScaleUnits, item.finalScale, item.finalSellPrice = row[5], row[6], row[7], row[7] / 100, row[8]
+                item.sourceEggId, item.baseSellPrice, item.finalScaleUnits, item.finalScale, item.finalSellPrice = row[4], row[5], row[6], row[6] / 100, row[7]
                 data.Eggs[item.itemId] = item; data.EggOrder[#data.EggOrder + 1] = item.itemId
             end
             ids[item.itemId], sequences[item.sequence] = true, true
@@ -251,12 +275,14 @@ function InventoryService:Start(context)
         end -- 恢复协调方提交所有模块后再通知，避免半恢复快照。
     end
 
-    function runtime:AddChicken(playerId, chickenType)
+    -- finalSellPrice由偷鸡服务在生成时抽取一次；缺失直接拒绝，不重新随机或补基础价。
+    function runtime:AddChicken(playerId, chickenType, finalSellPrice)
         if not CanMutate(playerId) then return nil, "persistence_not_ready" end
         local config = GameConfig.ChickenTypes[chickenType]
         if not IsPositiveInteger(playerId) or not config or config.Enabled ~= true then
             return nil, "invalid_chicken_add"
         end
+        if not IsSellPrice(finalSellPrice) then return nil, "invalid_chicken_price" end
         if GameConfig.InventoryCapacity.Enabled then
             local ok, reason = self:CheckCapacity(playerId, "Chicken", 0, 1)
             if not ok then return nil, reason end
@@ -267,6 +293,7 @@ function InventoryService:Start(context)
             itemId = itemId,
             kind = "Chicken",
             typeId = chickenType,
+            finalSellPrice = finalSellPrice,
             displayName = config.DisplayName,
             count = 1,
             iconIndex = config.ChickenIconIndex,
@@ -377,6 +404,7 @@ function InventoryService:Start(context)
                 or not GameConfig.ChickenTypes[returnedChicken.typeId]
                 or type(returnedChicken.displayName) ~= "string"
                 or returnedChicken.count ~= 1
+                or not IsSellPrice(returnedChicken.finalSellPrice)
                 or not IsPositiveInteger(returnedChicken.iconIndex)
                 or not IsPositiveInteger(returnedChicken.sequence)
                 or returnedChicken.sequence > self.GlobalSequence

@@ -69,13 +69,16 @@ end
 function GuardianService:ValidateConfig(context)
     if context.Side ~= "Server" then return true end
     local errors = {}
+    if not IsPositiveInteger(GameConfig.Theft.GuardianPlayerAnchorSourceId) then
+        errors[#errors + 1] = "Theft.GuardianPlayerAnchorSourceId必须是正整数"
+    end
     local moveSeconds = GameConfig.Theft.GuardianManualMoveSeconds
     if type(moveSeconds) ~= "number" or moveSeconds ~= moveSeconds
         or moveSeconds <= 0 or moveSeconds == math.huge then
         errors[#errors + 1] = "Theft.GuardianManualMoveSeconds必须是有限正数"
     end
-    if type(GameConfig.Regions) ~= "table" or #GameConfig.Regions ~= 20 then
-        errors[#errors + 1] = "Regions 必须显式包含20个区域"
+    if type(GameConfig.Regions) ~= "table" or #GameConfig.Regions ~= 15 then
+        errors[#errors + 1] = "Regions 必须显式包含15个区域"
     end
     for index, region in ipairs(GameConfig.Regions or {}) do
         if region.RegionId ~= index then
@@ -103,6 +106,9 @@ function GuardianService:Start(context)
         ResetGeneration = 0,
         Resetting = false,
         Tracker = nil,
+        Players = {},
+        OwnedAnchors = {},
+        Departed = {},
     }
     context.Services.GuardianService = runtime
 
@@ -114,6 +120,134 @@ function GuardianService:Start(context)
         end
     )
     runtime.Tracker:Start()
+
+    local OnAnchorRebinding, OnAnchorReady, OnAnchorFailed
+    local sourceId = GameConfig.Theft.GuardianPlayerAnchorSourceId
+    local function CurrentPlayer(player)
+        return context.Services.GuardianService == runtime and runtime.Players[player.playerId] == player
+    end
+    local function AnchorLog(player, stage, reason)
+        Log:PrintError("[GuardianService] 玩家追踪锚点失败", "playerId:", player.playerId,
+            "anchorId:", tostring(player.anchorId), "stage:", stage, "reason:", tostring(reason))
+    end
+    local function AnchorCall(player, stage, callback)
+        local ok, reason = pcall(callback)
+        if not ok then
+            player.ready, player.pending, player.failed = false, false, true
+            AnchorLog(player, stage, reason)
+            if CurrentPlayer(player) and OnAnchorFailed then OnAnchorFailed(player) end
+        end
+        return ok
+    end
+    local function DestroyAnchor(player, id)
+        if not id or id == sourceId or runtime.OwnedAnchors[id] ~= player then return end
+        runtime.OwnedAnchors[id] = nil
+        AnchorCall(player, "destroy", function() Element:Destroy(id) end)
+    end
+    local function BindAnchor(player)
+        if not CurrentPlayer(player) or not player.anchorId then return end
+        player.version = player.version + 1
+        local version, id = player.version, player.anchorId
+        player.ready = false
+        player.pending, player.failed = true, false
+        for _, field in ipairs({ "bindTimer", "verifyTimer" }) do
+            if player[field] then context.Timers:Remove(player[field]); player[field] = nil end
+        end
+        local function Current()
+            return CurrentPlayer(player) and player.version == version and player.anchorId == id
+        end
+        player.bindTimer = context.Timers:AddFrame(GuardianService.Name,
+            GameConfig.Runtime.EngineOperationDelayFrames, function()
+                player.bindTimer = nil
+                if not Current() then return end
+                if not AnchorCall(player, "bind_root", function()
+                    if not Element:GetPosition(id) then error("无法读取锚点位置") end
+                    Element:BindingToCharacterOrCreature(id, player.playerId,
+                        Character.SOCKET_NAME.Root, Character.SOCKET_MODE.SnapToTarget)
+                end) then return end
+                player.verifyTimer = context.Timers:AddFrame(GuardianService.Name,
+                    GameConfig.Runtime.EngineOperationDelayFrames, function()
+                        player.verifyTimer = nil
+                        if not Current() then return end
+                        if not AnchorCall(player, "verify_root", function()
+                            if Element:GetAttachParentCharacter(id) ~= player.playerId then
+                                error("锚点Root附加校验不匹配")
+                            end
+                            player.ready = true
+                            player.pending = false
+                        end) then return end
+                        if OnAnchorReady then OnAnchorReady(player) end
+                    end)
+            end)
+    end
+    local function SpawnAnchor(player)
+        if not CurrentPlayer(player) or player.spawnRequested then return end
+        player.spawnRequested = true
+        player.pending = true
+        AnchorCall(player, "spawn", function()
+            local position = Character:GetPosition(player.playerId)
+            if not position then error("无法读取玩家位置") end
+            Element:SpawnElement(Element.SPAWN_SOURCE.Scene, sourceId, function(id)
+                if not IsPositiveInteger(id) or id == sourceId then
+                    player.pending, player.failed = false, true
+                    if CurrentPlayer(player) and OnAnchorFailed then OnAnchorFailed(player) end
+                    AnchorLog(player, "spawn_callback", "未返回独立副本: " .. tostring(id)); return
+                end
+                -- 只认领本请求生成的独立ID；重复/旧会话回调不得清理新会话或别人的副本。
+                if runtime.OwnedAnchors[id] then
+                    if runtime.OwnedAnchors[id] ~= player then
+                        player.pending, player.failed = false, true
+                        if CurrentPlayer(player) and OnAnchorFailed then OnAnchorFailed(player) end
+                        AnchorLog(player, "spawn_callback", "副本ID已由其他会话持有: " .. tostring(id))
+                    end
+                    return
+                end
+                runtime.OwnedAnchors[id] = player
+                if not CurrentPlayer(player) or player.anchorId then DestroyAnchor(player, id); return end
+                player.anchorId = id
+                BindAnchor(player)
+            end, CopyPosition(position), Engine.Rotator(0, 0, 0), 1, false)
+        end)
+    end
+    runtime.EnterCallback = function(playerId)
+        if context.Services.GuardianService ~= runtime or not IsPositiveInteger(playerId) then return end
+        runtime.Departed[playerId] = nil
+        if runtime.Players[playerId] then return end
+        local player = { playerId = playerId, version = 0, ready = false }
+        runtime.Players[playerId] = player
+        if runtime.Ready then SpawnAnchor(player) end
+    end
+    runtime.LeaveCallback = function(playerId)
+        if context.Services.GuardianService ~= runtime then return end
+        runtime.Departed[playerId] = true
+        local player = runtime.Players[playerId]
+        if not player then return end
+        runtime.Players[playerId] = nil
+        player.version = player.version + 1
+        player.ready = false
+        if player.bindTimer then context.Timers:Remove(player.bindTimer) end
+        if player.verifyTimer then context.Timers:Remove(player.verifyTimer) end
+        DestroyAnchor(player, player.anchorId)
+    end
+    runtime.ReviveCallback = function(playerId)
+        if context.Services.GuardianService ~= runtime or runtime.Departed[playerId] then return end
+        local player = runtime.Players[playerId]
+        if not player then runtime.EnterCallback(playerId); return end
+        player.ready = false
+        if OnAnchorRebinding then OnAnchorRebinding(player) end
+        if player.anchorId then BindAnchor(player) end
+    end
+    runtime.AnchorBindings = {
+        { Events.ON_PLAYER_ENTER, runtime.EnterCallback },
+        { Events.ON_PLAYER_JOIN_MIDWAY, runtime.EnterCallback },
+        { Events.ON_PLAYER_RECONNECTED, runtime.EnterCallback },
+        { Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback },
+        { Events.ON_PLAYER_LEAVE, runtime.LeaveCallback },
+        { Events.ON_CHARACTER_RESPAWN, runtime.ReviveCallback },
+        { Events.ON_CHARACTER_REVIVED, runtime.ReviveCallback },
+    }
+    for _, binding in ipairs(runtime.AnchorBindings) do System:RegisterEvent(binding[1], binding[2]) end
+    runtime.DestroyAnchor = DestroyAnchor
 
     local StartNext
     local function IsActive(regionRuntime, active)
@@ -130,7 +264,9 @@ function GuardianService:Start(context)
             diagnosticRevision = diagnosticRevision + 1
             local message = { regionId = regionRuntime.Config.RegionId, sequence = active.sequence,
                 generation = active.generation, revision = diagnosticRevision, phase = phase,
-                guardianId = regionRuntime.GuardianElementId, targetId = active.rootId,
+                guardianId = regionRuntime.GuardianElementId, targetId = active.movementTargetId,
+                playerId = active.playerId, anchorId = active.anchorId,
+                chickenRootId = active.rootId, movementTargetId = active.movementTargetId,
                 sentTime = Diagnostic.Time() }
             if phase ~= "invalidated" then Diagnostic.Sample("Server", message) end
             for _, playerId in ipairs(Character:GetAllPlayerIds() or {}) do
@@ -144,10 +280,12 @@ function GuardianService:Start(context)
         if active then Sample(regionRuntime, active, "invalidated") end
     end
     local function ScheduleSample(regionRuntime, active, frames, delay, phase)
+        local revision = active.trackingRevision
         Diagnostic.Safe(function()
             local function Read()
                 Diagnostic.Safe(function()
-                    if not IsActive(regionRuntime, active) or active.state ~= "Tracking" then return end
+                    if not IsActive(regionRuntime, active) or active.state ~= "Tracking"
+                        or active.trackingRevision ~= revision then return end
                     Sample(regionRuntime, active, phase)
                 end)
             end
@@ -167,19 +305,10 @@ function GuardianService:Start(context)
         end
     end
 
-    local function FinishActive(regionRuntime, active, returnedTarget, result)
+    local function FinishActive(regionRuntime, active, result)
         if not IsActive(regionRuntime, active) then return end
         Sample(regionRuntime, active, "returned")
         regionRuntime.Active = nil
-        if active.resolution == "caught" and returnedTarget then
-            context.Events:Publish("GuardianChickenReturned", {
-                regionId = regionRuntime.Config.RegionId,
-                chickenRootId = active.rootId,
-                spawnPosition = CopyPosition(active.spawnPosition),
-                operation = active.operation + 1,
-                generation = active.chickenGeneration,
-            })
-        end
         Log:PrintServerLog("[GuardianService] 守护者目标已结束",
             "regionId:", regionRuntime.Config.RegionId,
             "rootId:", active.rootId,
@@ -188,12 +317,13 @@ function GuardianService:Start(context)
         StartNext(regionRuntime)
     end
 
-    local BeginTracking
+    local BeginTracking, ReturnGuardian
     BeginTracking = function(regionRuntime, active)
         if not IsActive(regionRuntime, active)
             or (active.state ~= "Delay" and active.state ~= "Approaching")
             or active.firstTrackingWait then return end
         active.delayTimerId = nil
+        local revision = active.trackingRevision
         if not regionRuntime.FirstTrackingReady then
             if not regionRuntime.FirstTrackingPositionSet then
                 Sample(regionRuntime, active, "initial_position_before")
@@ -208,7 +338,7 @@ function GuardianService:Start(context)
             active.delayTimerId = context.Timers:AddFrame(GuardianService.Name,
                 GameConfig.Runtime.EngineOperationDelayFrames, function()
                     if not IsActive(regionRuntime, active) or active.state ~= expectedState
-                        or not active.firstTrackingWait then return end
+                        or not active.firstTrackingWait or active.trackingRevision ~= revision then return end
                     active.delayTimerId = nil
                     active.firstTrackingWait = nil
                     regionRuntime.FirstTrackingReady = true
@@ -217,15 +347,42 @@ function GuardianService:Start(context)
                 end)
             return
         end
+        local movementTargetId = active.rootId
+        if active.playerId then
+            local player = runtime.Players[active.playerId]
+            if not player or not player.ready then
+                if player and player.pending and not player.failed then
+                    active.state = "AnchorPending"
+                    return
+                end
+                active.state = "AnchorUnavailable"
+                AnchorLog(player or { playerId = active.playerId }, "begin_tracking", "锚点未就绪，不改追其他目标")
+                return
+            end
+            local ok, parentId = pcall(function() return Element:GetAttachParentCharacter(player.anchorId) end)
+            if not ok or parentId ~= active.playerId then
+                player.ready = false
+                active.state = "AnchorUnavailable"
+                AnchorLog(player, "begin_tracking", "Root附加失效: " .. tostring(parentId))
+                return
+            end
+            active.anchorId = player.anchorId
+            movementTargetId = player.anchorId
+        else
+            active.anchorId = nil
+        end
+        active.movementTargetId = movementTargetId
         active.state = "Tracking"
         local guardianConfig = regionRuntime.Config.Guardian
         Sample(regionRuntime, active, "before_tracking")
-        local started, reason = runtime.Tracker:TrackTarget({
+        local request = {
             debugName = "区域" .. tostring(regionRuntime.Config.RegionId)
                 .. "守护者追踪鸡" .. tostring(active.rootId),
             guardianElementId = regionRuntime.GuardianElementId,
             triggerBoxId = regionRuntime.TriggerBoxId,
             targetElementId = active.rootId,
+            movementTargetId = movementTargetId,
+            returnTargetOnCaught = false,
             guardianReturnPosition = regionRuntime.GuardianReturnPosition,
             targetReturnPosition = active.spawnPosition,
             initialSpeed = guardianConfig.InitialSpeed,
@@ -233,8 +390,10 @@ function GuardianService:Start(context)
             maxVelocity = guardianConfig.MaxSpeed,
             distanceKeep = guardianConfig.KeepDistance,
             onCaught = function(caughtResult)
-                if not IsActive(regionRuntime, active) or active.state ~= "Tracking" then return end
+                if not IsActive(regionRuntime, active) or active.state ~= "Tracking"
+                    or active.trackingRevision ~= revision then return end
                 Sample(regionRuntime, active, "invalidated")
+                local caughtPlayerId = active.playerId
                 active.state = "Caught"
                 active.resolution = "caught"
                 context.Events:Publish("GuardianCaughtChicken", {
@@ -244,8 +403,8 @@ function GuardianService:Start(context)
                     operation = active.operation,
                     generation = active.chickenGeneration,
                 })
-                if active.playerId then
-                    local playerPosition = Character:GetPosition(active.playerId)
+                if caughtPlayerId then
+                    local playerPosition = Character:GetPosition(caughtPlayerId)
                     if not playerPosition then
                         error("守护者命中时无法读取玩家位置")
                     end
@@ -255,33 +414,94 @@ function GuardianService:Start(context)
                         guardianConfig.KnockbackHorizontalForce,
                         guardianConfig.KnockbackUpForce
                     )
-                    Character:AddImpulse(active.playerId, impulse)
+                    Character:AddImpulse(caughtPlayerId, impulse)
                     Log:PrintServerLog("[GuardianService] 守护者命中并击飞玩家",
                         "regionId:", regionRuntime.Config.RegionId,
-                        "playerId:", active.playerId,
+                        "playerId:", caughtPlayerId,
                         "chickenRootId:", active.rootId,
                         "horizontalForce:", guardianConfig.KnockbackHorizontalForce,
                         "upForce:", guardianConfig.KnockbackUpForce)
                 end
+                if IsActive(regionRuntime, active) and active.state == "Caught" then
+                    ReturnGuardian(regionRuntime, active, "guardian_caught")
+                end
             end,
             onReturned = function(result)
-                FinishActive(regionRuntime, active, result.returnedTarget == true, result)
+                if active.trackingRevision ~= revision then return end
+                FinishActive(regionRuntime, active, result)
             end,
-        })
-        if not started then
+        }
+        local ok, started, reason = pcall(function() return runtime.Tracker:TrackTarget(request) end)
+        if not ok or not started then
             Sample(regionRuntime, active, "invalidated")
-            error("守护者开始追踪失败，region=" .. tostring(regionRuntime.Config.RegionId)
-                .. " reason=" .. tostring(reason))
+            active.state = "TrackingFailed"
+            Log:PrintError("[GuardianService] 守护者开始追踪失败，不重试或改追其他目标",
+                "regionId:", regionRuntime.Config.RegionId, "playerId:", tostring(active.playerId),
+                "anchorId:", tostring(active.anchorId), "chickenRootId:", active.rootId,
+                "movementTargetId:", movementTargetId, "reason:", tostring(ok and reason or started))
+            return
         end
+        active.hasTracked = true
         ScheduleSample(regionRuntime, active, true, GameConfig.Runtime.EngineOperationDelayFrames, "after_two_frames")
         ScheduleSample(regionRuntime, active, false, 1, "after_one_second")
     end
 
-    local function ReturnGuardian(regionRuntime, active, reason)
+    -- 只替换运动会话；旧命中/返程/采样回调不能接管切换后的鸡。
+    local function InvalidateTracking(regionRuntime, active)
+        Sample(regionRuntime, active, "invalidated")
+        active.trackingRevision = active.trackingRevision + 1
+        if active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
+        active.delayTimerId, active.firstTrackingWait = nil, nil
+        if active.state == "Tracking" then
+            runtime.Tracker:CancelGuardian(regionRuntime.GuardianElementId, "movement_target_changed")
+        end
+    end
+    local function ContinueTracking(regionRuntime, active)
+        active.state = "Delay"
+        local revision = active.trackingRevision
+        local delay = math.max(0, (active.readyAtMs - MiscService:GetServerTimestamp()) / 1000)
+        if delay == 0 then BeginTracking(regionRuntime, active); return end
+        active.delayTimerId = context.Timers:AddTimer(GuardianService.Name, delay, function()
+            if IsActive(regionRuntime, active) and active.trackingRevision == revision then
+                BeginTracking(regionRuntime, active)
+            end
+        end)
+    end
+    OnAnchorRebinding = function(player)
+        for _, regionRuntime in pairs(runtime.Regions) do
+            local active = regionRuntime.Active
+            if active and active.playerId == player.playerId
+                and (active.state == "Tracking" or active.state == "Delay" or active.state == "AnchorUnavailable"
+                    or active.state == "AnchorPending") then
+                InvalidateTracking(regionRuntime, active)
+                active.state = "AnchorRebinding"
+            end
+        end
+    end
+    OnAnchorReady = function(player)
+        for _, regionRuntime in pairs(runtime.Regions) do
+            local active = regionRuntime.Active
+            if active and active.playerId == player.playerId
+                and (active.state == "AnchorRebinding" or active.state == "AnchorPending")
+                and IsActive(regionRuntime, active) then ContinueTracking(regionRuntime, active) end
+        end
+    end
+    OnAnchorFailed = function(player)
+        for _, regionRuntime in pairs(runtime.Regions) do
+            local active = regionRuntime.Active
+            if active and active.playerId == player.playerId
+                and (active.state == "AnchorPending" or active.state == "AnchorRebinding") then
+                active.state = "AnchorUnavailable"
+            end
+        end
+    end
+
+    ReturnGuardian = function(regionRuntime, active, reason)
         if not IsActive(regionRuntime, active) then return end
         if active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
         active.delayTimerId = nil
         Sample(regionRuntime, active, "invalidated")
+        active.trackingRevision = active.trackingRevision + 1
         active.state = "ManualReturning"
         active.resolution = reason
         active.playerId = nil
@@ -293,7 +513,7 @@ function GuardianService:Start(context)
             reason = reason,
             onArrived = function(result)
                 if not IsActive(regionRuntime, active) or active.state ~= "ManualReturning" then return end
-                FinishActive(regionRuntime, active, false, result)
+                FinishActive(regionRuntime, active, result)
             end,
         })
         if not started then error("主动放下后守护者返程失败: " .. tostring(failure)) end
@@ -326,14 +546,8 @@ function GuardianService:Start(context)
             if not started then error("守护者接近再拾取位置失败: " .. tostring(failure)) end
             return
         end
-        active.state = "Delay"
-        local now = MiscService:GetServerTimestamp()
-        local delaySeconds = math.max(0, (active.readyAtMs - now) / 1000)
-        active.delayTimerId = context.Timers:AddTimer(
-            GuardianService.Name,
-            delaySeconds,
-            function() BeginTracking(regionRuntime, active) end
-        )
+        local delaySeconds = math.max(0, (active.readyAtMs - MiscService:GetServerTimestamp()) / 1000)
+        ContinueTracking(regionRuntime, active)
         Log:PrintServerLog("[GuardianService] 守护者目标进入延迟",
             "regionId:", regionRuntime.Config.RegionId,
             "rootId:", active.rootId,
@@ -359,6 +573,7 @@ function GuardianService:Start(context)
             readyAtMs = MiscService:GetServerTimestamp()
                 + regionRuntime.Config.Guardian.TrackDelaySeconds * 1000,
             resolution = nil,
+            trackingRevision = 0,
         }
         StartNext(regionRuntime)
     end)
@@ -367,29 +582,29 @@ function GuardianService:Start(context)
         if context.Services.GuardianService ~= runtime or runtime.Resetting then return end
         local regionRuntime = runtime.Regions[snapshot.regionId]
         if not regionRuntime then return end
-        if snapshot.reason == "manual" then
-            RemoveCandidate(regionRuntime, snapshot.chickenRootId, snapshot.previousOperation, snapshot.generation)
-            local active = regionRuntime.Active
-            if active and active.rootId == snapshot.chickenRootId
-                and active.operation == snapshot.previousOperation
-                and active.chickenGeneration == snapshot.generation then
-                ReturnGuardian(regionRuntime, active, "manual_drop")
-            end
+        RemoveCandidate(regionRuntime, snapshot.chickenRootId, snapshot.previousOperation, snapshot.generation)
+        local active = regionRuntime.Active
+        if active and active.rootId == snapshot.chickenRootId
+            and active.operation == snapshot.previousOperation
+            and active.chickenGeneration == snapshot.generation then
+            ReturnGuardian(regionRuntime, active, snapshot.reason .. "_drop")
+        end
+    end)
+
+    context.Events:Subscribe(GuardianService.Name, "StolenChickenRelocated", function(snapshot)
+        if context.Services.GuardianService ~= runtime or runtime.Resetting then return end
+        local regionRuntime = runtime.Regions[snapshot.regionId]
+        if not regionRuntime then return end
+        RemoveCandidate(regionRuntime, snapshot.chickenRootId, nil, snapshot.generation)
+        local active = regionRuntime.Active
+        if not active or active.rootId ~= snapshot.chickenRootId
+            or active.chickenGeneration ~= snapshot.generation then return end
+        -- 主动放下后的守护者可能仍在独立返程；不重启、也不取消这次返程。
+        if active.state == "ManualReturning" then
+            active.rootId = nil
             return
         end
-        if regionRuntime.Active and regionRuntime.Active.rootId == snapshot.chickenRootId
-            and regionRuntime.Active.operation == snapshot.previousOperation
-            and regionRuntime.Active.chickenGeneration == snapshot.generation then
-            regionRuntime.Active.playerId = nil
-            regionRuntime.Active.operation = snapshot.operation
-        end
-        for _, candidate in ipairs(regionRuntime.Candidates) do
-            if candidate.rootId == snapshot.chickenRootId and candidate.operation == snapshot.previousOperation
-                and candidate.chickenGeneration == snapshot.generation then
-                candidate.playerId = nil
-                candidate.operation = snapshot.operation
-            end
-        end
+        ReturnGuardian(regionRuntime, active, "countdown_relocated")
     end)
 
     context.Events:Subscribe(GuardianService.Name, "StolenChickenOwned", function(snapshot)
@@ -402,12 +617,16 @@ function GuardianService:Start(context)
             or active.chickenGeneration ~= snapshot.generation then return end
         Sample(regionRuntime, active, "invalidated")
         active.resolution = "owned"
-        if active.state == "Delay" then
+        local withoutSession = active.state == "Delay" or active.state == "AnchorRebinding"
+            or active.state == "AnchorUnavailable" or active.state == "AnchorPending"
+            or active.state == "TrackingFailed"
+        if withoutSession and not active.hasTracked then
             if active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
             regionRuntime.Active = nil
             StartNext(regionRuntime)
-        elseif active.state == "Tracking" or active.state == "Approaching" then
-            local fromApproach = active.state == "Approaching"
+        elseif active.state == "Tracking" or active.state == "Approaching" or withoutSession then
+            local fromApproach = active.state == "Approaching" or withoutSession
+            if active.delayTimerId then context.Timers:Remove(active.delayTimerId); active.delayTimerId = nil end
             active.state = "ReturningOwned"
             local stopped, reason = runtime.Tracker:StopAndReturnGuardian(
                 regionRuntime.GuardianElementId,
@@ -419,7 +638,7 @@ function GuardianService:Start(context)
                     targetElementId = active.rootId,
                     guardianReturnPosition = regionRuntime.GuardianReturnPosition,
                     targetReturnPosition = active.spawnPosition,
-                    onReturned = function(result) FinishActive(regionRuntime, active, false, result) end,
+                    onReturned = function(result) FinishActive(regionRuntime, active, result) end,
                 } or nil
             )
             if not stopped then
@@ -499,6 +718,10 @@ function GuardianService:Start(context)
             end
         end
         runtime.Ready = true
+        for _, playerId in ipairs(Character:GetAllPlayerIds() or {}) do
+            if not runtime.Departed[playerId] then runtime.EnterCallback(playerId) end
+        end
+        for _, player in pairs(runtime.Players) do SpawnAnchor(player) end
         Log:PrintServerLog("[GuardianService] 正式守护者模块已就绪",
             "enabledRegionCount:", enabledCount)
     end)
@@ -511,6 +734,15 @@ function GuardianService:Stop(context)
     for _, region in pairs(runtime.Regions) do runtime.InvalidateDiagnostic(region, region.Active) end
     Diagnostic.Safe(function() context.Timers:RemoveOwner("GuardianDiagnosticServer") end)
     context.Services.GuardianService = nil
+    for _, binding in ipairs(runtime.AnchorBindings) do System:UnregisterEvent(binding[1], binding[2]) end
+    for _, player in pairs(runtime.Players) do
+        player.version = player.version + 1
+        player.ready = false
+        if player.bindTimer then context.Timers:Remove(player.bindTimer) end
+        if player.verifyTimer then context.Timers:Remove(player.verifyTimer) end
+        runtime.DestroyAnchor(player, player.anchorId)
+    end
+    runtime.Players = {}
     runtime.ResetGeneration = runtime.ResetGeneration + 1
     runtime.Resetting = true
     if runtime.Tracker then runtime.Tracker:Stop() end

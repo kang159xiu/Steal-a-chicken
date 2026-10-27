@@ -1,5 +1,6 @@
 local GameConfig = require "Common.Config.GameConfig"
 local FeatureFlags = require "Common.Config.FeatureFlags"
+local Decimal = require "Common.DecimalInteger"
 
 local HomeService = {
     Name = "HomeService",
@@ -147,6 +148,27 @@ function HomeService:Start(context)
         local record = self.TreadmillResourcesByHome[homeId]
         if not self.Ready or not self.TreadmillResourcesReady or not record then return nil end
         return { homeId = homeId, triggerId = record.triggerId, positionId = record.positionId }
+    end
+
+    function runtime:UpdateTreadmillExperienceText(homeId, level)
+        local record = self.TreadmillResourcesByHome[homeId]
+        if context.Services.HomeService ~= self or not self.Ready or not self.TreadmillResourcesReady or not record then return end
+        local ids = record.experienceDisplayIds
+        if not ids or #ids == 0 then return end
+        local ok, text = pcall(function()
+            return "+" .. Decimal.Format(GameConfig.TreadmillLevels[level].ExperiencePerTick) .. "/步"
+        end)
+        if not ok then
+            Log:PrintError("[Treadmill] 增量文字格式失败，不重试", "homeId:", homeId, "level:", level, tostring(text))
+            return
+        end
+        if record.experienceDisplayText == text then return end
+        record.experienceDisplayText = text -- 记录本次尝试；写入失败不自动重试。
+        for _, id in ipairs(ids) do
+            local written, err = pcall(function() FuncElement:SetTextBoardText(id, text) end)
+            if not written then Log:PrintError("[Treadmill] 增量文字写入失败，不重试", "homeId:", homeId,
+                "elementId:", id, "level:", level, tostring(err)) end
+        end
     end
 
     function runtime:IsOwner(playerId, homeId)
@@ -303,6 +325,7 @@ function HomeService:Start(context)
         AuditMappings(source)
         WriteHomeOwner(playerId, homeId, true)
         WriteTreadmillOwner(playerId, homeId, true) -- 先清空再发布释放，避免覆盖事件中分配的新主人。
+        runtime:UpdateTreadmillExperienceText(homeId, GameConfig.Treadmill.DefaultLevel)
         context.Events:Publish("HomeReleased", {
             playerId = playerId,
             homeId = homeId,
@@ -689,7 +712,8 @@ function HomeService:Start(context)
                 local record = {}
                 local ok, err = pcall(function()
                     local treadmill = GameConfig.Treadmill
-                    local matches = { [treadmill.TrainingPurpose] = {}, [treadmill.PositionPurpose] = {} }
+                    local matches = { [treadmill.TrainingPurpose] = {}, [treadmill.PositionPurpose] = {},
+                        [treadmill.ExperienceDisplayPurpose] = {} }
                     local visited = {}
                     local function Visit(parentId)
                         if visited[parentId] then error("跑步机资源树重复或循环") end
@@ -701,6 +725,7 @@ function HomeService:Start(context)
                         end
                     end
                     Visit(homeId)
+                    record.experienceDisplayIds = matches[treadmill.ExperienceDisplayPurpose]
                     for _, entry in ipairs({ { treadmill.TrainingPurpose, "triggerId" },
                         { treadmill.PositionPurpose, "positionId" } }) do
                         local ids = matches[entry[1]]
@@ -715,6 +740,7 @@ function HomeService:Start(context)
             for _, homeId in ipairs(runtime.HomeIds) do
                 local ownerId = runtime.HomeToPlayer[homeId]
                 WriteTreadmillOwner(ownerId, homeId, ownerId == nil)
+                runtime:UpdateTreadmillExperienceText(homeId, GameConfig.Treadmill.DefaultLevel)
             end
             context.Events:Publish("HomeTreadmillResourcesReady")
         end

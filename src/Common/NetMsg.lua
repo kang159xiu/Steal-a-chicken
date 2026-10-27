@@ -49,6 +49,8 @@ local NetMsg = {
         PlacementCancel = 1322,
         PlacementResult = 1323,
         PlacementSnapshotRequest = 1324,
+        ChickenModelState = 1330, -- 已放置/快捷栏模型身份及独立售价；仅供客户端文字表现。
+        ChickenModelSnapshotRequest = 1331,
         EggGrowthState = 1400,
         EggGrowthRemoved = 1401,
         EggGrowthSnapshotRequest = 1402,
@@ -62,7 +64,7 @@ local NetMsg = {
         EggCollectionListAction = 1422,
         EggCollectionListResult = 1423,
         -- 1500/1503 balance、1503 total：无前导零的非负十进制整数字符串（零为"0"）。
-        -- 单项sellPrice、会话代次、版本及requestId继续使用安全整数number。
+        -- 单项sellPrice同为精确非负十进制字符串；会话代次、版本及requestId使用安全整数number。
         SellShopState = 1500,
         SellShopSnapshotRequest = 1501,
         SellShopAction = 1502,
@@ -83,6 +85,20 @@ local NetMsg = {
         RebirthSnapshotRequest = 1701,
         RebirthAction = 1702,
         RebirthResult = 1703,
+        RebirthPurchaseOpen = 1704,
+        RebirthPurchaseOffer = 1705,
+        RebirthVoucherCheck = 1706, -- 只唤醒服务端核票，不是购买凭据。
+        RebirthPurchaseResult = 1707,
+        MultiplierPurchaseState = 1710,
+        MultiplierPurchaseSnapshotRequest = 1711,
+        MultiplierPurchaseOpen = 1712,
+        MultiplierPurchaseOffer = 1713,
+        MultiplierVoucherCheck = 1714, -- 空请求只唤醒真实库存核票。
+        MultiplierPurchaseResult = 1715,
+        TrackShopState = 1720,
+        TrackShopSnapshotRequest = 1721,
+        TrackShopAction = 1722,
+        TrackShopResult = 1723,
     },
 }
 

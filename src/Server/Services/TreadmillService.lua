@@ -84,6 +84,7 @@ function TreadmillService:Start(context)
             training = state ~= nil and state.training == true, busy = state ~= nil and state.operation ~= nil,
             expectedLevel = level, upgradeCost = rows[level].UpgradeCost, experiencePerTick = amount, nextExperiencePerTick = nextAmount,
             speedLevel = snapshot and snapshot.speedLevel, experience = snapshot and snapshot.experience,
+            speedUpgradeExperience = snapshot and snapshot.speedUpgradeExperience,
             walkSpeed = snapshot and snapshot.walkSpeed, rebirthCount = snapshot and snapshot.rebirthCount,
             multiplier = snapshot and snapshot.multiplier,
         })
@@ -173,6 +174,11 @@ function TreadmillService:Start(context)
                     end
                     if upgrade and persistence then persistence:MarkDirty(id, "treadmill_upgrade") end
                     state.rootId = root; state.operation = nil; state.targetVersion = NextTarget()
+                    home:UpdateTreadmillExperienceText(state.homeId, state.level)
+                    if upgrade then
+                        local signOk, signError = pcall(function() System:FireSignEvent("跑步机升级", { id }) end)
+                        if not signOk then Log:PrintError("[Treadmill] 升级成功信号发送失败", id, tostring(signError)) end
+                    end
                     if not upgrade and Inside(id, state) then state.training = true end
                     if notify then
                         local notified, notifyError = pcall(notify)
@@ -211,8 +217,16 @@ function TreadmillService:Start(context)
         state = { homeId = homeId, generation = generation, level = 1, triggerId = resources.triggerId,
             positionId = resources.positionId, targetVersion = NextTarget(), training = false, lastRequestId = 0 }
         rt.Players[id] = state
+        home:UpdateTreadmillExperienceText(homeId, state.level)
         if not rt.Dead[id] then CopyModel(id, state, 1, false) end
         return state
+    end
+    function rt:CanPurchaseMultiplier(id, generation)
+        local state = rt.Players[id]
+        if not CanPlay(id) or not economy:IsCurrent(id, generation) or rt.Dead[id] then return false, "session_unavailable" end
+        if not state or state.generation ~= generation or not Current(id, state) then return false, "treadmill_unavailable" end
+        if state.operation then return false, "treadmill_busy" end
+        return true
     end
     function rt:PrepareReset(id, generation, callback)
         local state = Ensure(id)
@@ -227,31 +241,40 @@ function TreadmillService:Start(context)
         local state = rt.Players[id]
         if state and state.operation == token and token.reset then CancelOperation(state); Send(id) end
     end
-    function rt:CommitReset(id, generation, token, commitGrowth)
+    function rt:PrepareResetCommit(id, generation, token, commitGrowth)
         local state = rt.Players[id]
         if not token or not state or state.operation ~= token or not token.reset or not token.prepared or token.invalid
             or token.playerId ~= id or token.generation ~= generation or not Current(id, state) or rt.Dead[id] then
-            return false, "reset_expired"
+            return nil, "reset_expired"
         end
-        if rt.Players[id] ~= state or state.operation ~= token or token.invalid or rt.Dead[id] then return false, "reset_expired" end
-        -- Current中所有引擎读取已完成；两份状态连续提交，中间没有等待/通知/引擎调用。
-        local committed, publishGrowth = commitGrowth()
-        if not committed then return false, publishGrowth end
-        local oldRoot = state.rootId
-        state.level = 1; state.rootId = token.rootId; state.operation = nil; state.targetVersion = NextTarget()
-        token.committed = true
-        local notified = false
-        return true, function()
-            if notified then return end; notified = true
-            local ok, err = pcall(publishGrowth)
-            if not ok then Log:PrintError("[Treadmill] 重生提交后成长通知失败", tostring(err)) end
-            Destroy(oldRoot)
-            if Current(id, state) then
-                Send(id)
-                context.Events:Publish("TreadmillLevelChanged", { playerId = id, homeId = state.homeId,
-                    sessionGeneration = generation, level = 1 })
+        return function()
+            if rt.Players[id] ~= state or state.operation ~= token or token.invalid or rt.Dead[id] then return false, "reset_expired" end
+            -- Current中所有引擎读取已完成；两份状态连续提交，中间没有等待/通知/引擎调用。
+            local committed, publishGrowth = commitGrowth()
+            if not committed then return false, publishGrowth end
+            local oldRoot = state.rootId
+            state.level = 1; state.rootId = token.rootId; state.operation = nil; state.targetVersion = NextTarget()
+            token.committed = true
+            local notified = false
+            return true, function()
+                if notified then return end; notified = true
+                local ok, err = pcall(publishGrowth)
+                if not ok then Log:PrintError("[Treadmill] 重生提交后成长通知失败", tostring(err)) end
+                Destroy(oldRoot)
+                if Current(id, state) then
+                    home:UpdateTreadmillExperienceText(state.homeId, state.level)
+                    Send(id)
+                    context.Events:Publish("TreadmillLevelChanged", { playerId = id, homeId = state.homeId,
+                        sessionGeneration = generation, level = 1 })
+                end
             end
         end
+        -- 返回的提交闭包只执行Lua状态提交，禁止引擎调用/等待/通知。
+    end
+    function rt:CommitReset(id, generation, token, commitGrowth)
+        local commit, reason = self:PrepareResetCommit(id, generation, token, commitGrowth)
+        if not commit then return false, reason end
+        return commit()
     end
     rt.EnterBox = Protect(function(id, triggerId)
         if not rt.Ready then return end
@@ -370,6 +393,7 @@ function TreadmillService:Start(context)
                     if not Current(id, state) or state.operation ~= token then Destroy(token.rootId); done(false, "restore_expired"); return end
                     state.rootId, state.operation = token.rootId, nil
                     token.committed = true
+                    home:UpdateTreadmillExperienceText(state.homeId, state.level)
                     done(true, function() Send(id); return true end)
                 end, true)
             end,

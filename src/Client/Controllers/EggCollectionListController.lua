@@ -1,6 +1,6 @@
 local GameConfig = require "Common.Config.GameConfig"
 
-local EggCollectionListController = { Name = "EggCollectionListController", FeatureFlag = "EggCollection", Dependencies = {} }
+local EggCollectionListController = { Name = "EggCollectionListController", FeatureFlag = "EggCollection", Dependencies = { "PromptController" } }
 local function Integer(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
 end
@@ -16,7 +16,8 @@ local units = { { 1e21, "Sx" }, { 1e18, "Qi" }, { 1e15, "Qa" }, { 1e12, "T" },
 local function MoneyText(value)
     for _, unit in ipairs(units) do
         if value >= unit[1] then
-            return string.format("%.2f", math.floor(value / unit[1] * 100 + 0.5) / 100) .. unit[2]
+            local text = string.format("%.2f", math.floor(value / unit[1] * 100 + 0.5) / 100)
+            return text:gsub("%.00$", "") .. unit[2]
         end
     end
     return string.format("%.0f", value)
@@ -274,8 +275,8 @@ function EggCollectionListController:Start(context)
             for _, result in ipairs(message.results or {}) do
                 if result.reason == "inventory_capacity_full" then full = true; break end
             end
-            if full then UI:ShowMessageTip("库存已满，无法入库")
-            elseif message.reason == "egg_not_mature" then UI:ShowMessageTip("鸡蛋尚未孵化")
+            if full then context.Services.PromptController:Show("鸡蛋库存已满，请先出售")
+            elseif message.reason == "egg_not_mature" then context.Services.PromptController:Show("鸡蛋还未孵化完成")
             else Log:PrintLog("[EggCollectionList] 收取失败", "requestId:", message.requestId, "reason:", tostring(message.reason)) end
         end
     end)

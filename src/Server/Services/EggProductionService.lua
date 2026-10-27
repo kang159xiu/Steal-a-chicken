@@ -72,7 +72,7 @@ function EggProductionService:Start(context)
         end
     end
     local function GrowthState(egg)
-        return { eggId = egg.eggId, homeId = egg.homeId, rootId = egg.rootId,
+        return { eggId = egg.eggId, homeId = egg.homeId, rootId = egg.rootId, eggTypeId = egg.eggTypeId,
             baseSellPrice = egg.baseSellPrice, finalScaleUnits = egg.finalScaleUnits,
             finalScale = egg.finalScale, finalSellPrice = egg.finalSellPrice,
             spawnedAtMs = egg.spawnedAtMs, hatchDeadlineMs = egg.hatchDeadlineMs, version = egg.version }
@@ -175,13 +175,16 @@ function EggProductionService:Start(context)
     local function Advance(house, now)
         local elapsed = math.max(0, now - house.lastMs)
         house.lastMs = now
+        local changed = false
         if house.count + house.reserved < Capacity(house.playerId) then
             for _, chicken in pairs(house.chickens) do
                 if not chicken.paused and not chicken.pending then
-                    chicken.remainingMs = math.max(0, chicken.remainingMs - elapsed)
+                    local remaining = math.max(0, chicken.remainingMs - elapsed)
+                    if remaining ~= chicken.remainingMs then changed = true; chicken.remainingMs = remaining end
                 end
             end
         end
+        if changed and persistence then persistence:MarkDeferred(house.playerId, "production_progress") end
         for _, egg in pairs(house.eggs) do
             if not egg.mature and now >= egg.hatchDeadlineMs then
                 MarkMature(egg)
@@ -299,7 +302,7 @@ function EggProductionService:Start(context)
             QueueGrowth(house, egg)
             house.count = house.count + 1
             chicken.remainingMs = chicken.config.ProductionIntervalSeconds * 1000
-            if persistence then persistence:MarkDirty(house.playerId, "production_cycle_completed") end
+            if persistence then persistence:MarkDeferred(house.playerId, "production_cycle_completed") end
             SendCount(house)
             context.Events:Publish("EggSpawned", Copy(egg))
             System:SendToAllClients(context.NetMsg.Messages.EggGrowthState, GrowthState(egg))
@@ -491,12 +494,6 @@ function EggProductionService:Start(context)
             local homeId = home:GetPlayerHome(event.playerId)
             local house = homeId and runtime.Homes[homeId]
             if house then house.lastMs = Now(); SendCount(house) end
-        end)
-        -- 周期进度与经验一样定期合并；产出时立即另标脏，场景蛋从不导出。
-        context.Timers:AddLoopTimer(self.Name, 10, function()
-            for _, house in pairs(runtime.Homes) do
-                if Current(house) and CanPlay(house.playerId) and next(house.chickens) then persistence:MarkDirty(house.playerId, "production_progress") end
-            end
         end)
     end
     runtime.Cleanup = function()

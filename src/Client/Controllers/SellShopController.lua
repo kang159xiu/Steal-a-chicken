@@ -51,7 +51,7 @@ function SellShopController:Start(context)
             error("出售列表子控件UID缺失，itemId=" .. row.data.itemId)
         end
         UI:SetImage({ imageUid }, row.data.imageId, true)
-        UI:SetText({ priceUid }, MoneyText(assert(Decimal.FromSafeInteger(row.data.sellPrice), "单项售价超出安全整数范围")), false)
+        UI:SetText({ priceUid }, MoneyText(row.data.sellPrice), false)
         -- 引擎选择仅作为点击输入，不保留业务选中提示；显隐在回调外落地后设置。
         UI:SetVisibility({ borderUid }, false)
     end
@@ -153,7 +153,7 @@ function SellShopController:Start(context)
             for _, item in ipairs(group[1]) do
                 if type(item) ~= "table" or type(item.itemId) ~= "string" or item.itemId == "" or seen[item.itemId]
                     or item.kind ~= group[2] or item.count ~= 1 or not Integer(item.sequence) or item.sequence == 0
-                    or not Integer(item.iconIndex) or item.iconIndex == 0 or not Decimal.FromSafeInteger(item.sellPrice) then error("出售行格式无效") end
+                    or not Integer(item.iconIndex) or item.iconIndex == 0 or not Decimal.IsValid(item.sellPrice) then error("出售行格式无效") end
                 seen[item.itemId] = true
             end
         end

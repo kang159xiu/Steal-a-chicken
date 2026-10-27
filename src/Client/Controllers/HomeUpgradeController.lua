@@ -1,6 +1,6 @@
 local GameConfig = require "Common.Config.GameConfig"
 local Decimal = require "Common.DecimalInteger"
-local HomeUpgradeController = { Name = "HomeUpgradeController", FeatureFlag = "HomeUpgrade", Dependencies = {} }
+local HomeUpgradeController = { Name = "HomeUpgradeController", FeatureFlag = "HomeUpgrade", Dependencies = { "PromptController" } }
 local function Integer(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
 end
@@ -159,7 +159,7 @@ function HomeUpgradeController:Start(context)
             or type(message.success) ~= "boolean" then return end
         runtime.Pending[message.requestId] = nil
         if message.reason == "insufficient_balance" then
-            Ui("tip", config.ButtonId, function() UI:ShowMessageTip("钱币不足") end)
+            Ui("tip", config.ButtonId, function() context.Services.PromptController:Show("钱币不足") end)
         elseif not message.success then
             Log:PrintLog("[HomeUpgradeController] 升级失败", "requestId:", message.requestId, "reason:", tostring(message.reason))
         end

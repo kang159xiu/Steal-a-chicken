@@ -16,6 +16,8 @@ function Diagnostic.Sample(side, message)
                 "sequence:", tostring(message.sequence), "generation:", tostring(message.generation),
                 "phase:", tostring(message.phase), "guardian:", tostring(message.guardianId),
                 "target:", tostring(message.targetId), "sentTime:", tostring(message.sentTime),
+                "playerId:", tostring(message.playerId), "anchorId:", tostring(message.anchorId),
+                "chickenRootId:", tostring(message.chickenRootId), "movementTargetId:", tostring(message.movementTargetId),
                 "sampleTime:", Diagnostic.Time() }
             if side == "Client" then
                 fields[#fields + 1] = "localPlayerId:"
@@ -43,7 +45,6 @@ function Diagnostic.Sample(side, message)
         Write("element:", tostring(id), "parentInTree:", tostring(parent))
         Read(id, "position", function() return Element:GetPosition(id) end, true)
         Read(id, "scale", function() return Element:GetScale(id) end, true)
-        Read(id, "visible", function() return Element:IsVisible(id) end, false)
         local ok, children = pcall(function() return Element:GetChildElementsFromElement(id) end)
         if not ok or type(children) ~= "table" then
             Write("element:", tostring(id), "childrenReadOk:", tostring(ok), "childrenValue:", tostring(children)); return

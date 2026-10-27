@@ -1,6 +1,6 @@
 local GameConfig = require "Common.Config.GameConfig"
 
-local EggCollectionController = { Name = "EggCollectionController", FeatureFlag = "EggCollection", Dependencies = {} }
+local EggCollectionController = { Name = "EggCollectionController", FeatureFlag = "EggCollection", Dependencies = { "PromptController" } }
 local function Integer(value, minimum)
     return type(value) == "number" and value >= minimum and value < math.huge and value == math.floor(value)
 end
@@ -89,10 +89,10 @@ function EggCollectionController:Start(context)
             runtime.Snapshot = nil
             Show(false)
         elseif message.reason == "inventory_capacity_full" then
-            UI:ShowMessageTip("库存已满，无法入库")
+            context.Services.PromptController:Show("鸡蛋库存已满，请先出售")
             Render()
         elseif message.reason == "egg_not_mature" then
-            UI:ShowMessageTip("鸡蛋尚未孵化")
+            context.Services.PromptController:Show("鸡蛋还未孵化完成")
             Render()
         else
             Log:PrintLog("[EggCollectionController] 收取失败，等待当前目标状态",

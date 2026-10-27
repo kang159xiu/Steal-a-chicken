@@ -1,5 +1,5 @@
 local GameConfig = require "Common.Config.GameConfig"
-local PersistenceController = { Name = "PersistenceController", FeatureFlag = "Persistence" }
+local PersistenceController = { Name = "PersistenceController", FeatureFlag = "Persistence", Dependencies = { "PromptController" } }
 function PersistenceController:Start(context)
     if context.Side ~= "Client" or not GameConfig.Persistence.ProductionEnabled then return end
     local rt = { Active = true, Ready = false, Version = -1, Snapshot = nil, WriteFailureShown = false }
@@ -11,11 +11,15 @@ function PersistenceController:Start(context)
     local function Render()
         if not Current() or not rt.Ready or not rt.Snapshot then return end
         local data = rt.Snapshot
-        if not data.ready and LoadFailed(data.state) then
-            UI:ShowMessageTip("读取存档失败，请重新进入")
+        local failed = not data.ready and LoadFailed(data.state)
+        if not failed then rt.LoadFailureShown = nil end
+        if data.state ~= "save_failed" then rt.WriteFailureShown = false end
+        if failed and not rt.LoadFailureShown then
+            rt.LoadFailureShown = true
+            context.Services.PromptController:Show("存档读取失败，请重新进入游戏")
         elseif data.state == "save_failed" and not rt.WriteFailureShown then
             rt.WriteFailureShown = true
-            UI:ShowMessageTip("存档保存失败，数据待保存，下次正常保存时再试")
+            context.Services.PromptController:Show("保存失败，请暂时不要退出")
         end
     end
     rt.Callback = function(_, data)

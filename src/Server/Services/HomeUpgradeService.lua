@@ -16,7 +16,7 @@ function HomeUpgradeService:ValidateConfig()
     end
     for level, row in ipairs(levels) do
         local expected = level == 1 and "100" or "1" .. string.rep("0", level + 2)
-        if row.Level ~= level or row.ChickenCapacity ~= level + 4 or row.EggCapacity ~= level + 5
+        if row.Level ~= level or row.ChickenCapacity ~= level + 4 or not Integer(row.EggCapacity)
             or (level < 20 and (not Decimal.IsValid(row.UpgradeCost) or row.UpgradeCost ~= expected))
             or (level == 20 and row.UpgradeCost ~= nil) then return false, { "家园等级表不符合已确认数值，level=" .. tostring(level) } end
     end

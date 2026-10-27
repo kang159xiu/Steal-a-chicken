@@ -3,6 +3,7 @@
 local FeatureFlags = {
     Names = {
         "ElementCopyTest",
+        "GuideLineTest",
         "GuardianTrackTest",
         "CharacterBindingTest",
         "GuardianCarryIntegrationTest",
@@ -27,10 +28,14 @@ local FeatureFlags = {
         "Treadmill",
         "Rebirth",
         "Purchase",
+        "Prompt",
+        "MultiplierPurchase",
+        "TrackShop",
     },
 
     -- 仅用于避免共享开关在不需要该功能的端产生“未登记模块”警告。
     Scopes = {
+        GuideLineTest = { Server = false, Client = true },
         HotbarClickTest = { Server = false, Client = true },
         Persistence = { Server = true, Client = true },
         Zone = { Server = true, Client = false },
@@ -46,11 +51,16 @@ local FeatureFlags = {
         HomeUpgrade = { Server = true, Client = true },
         Treadmill = { Server = true, Client = true },
         Rebirth = { Server = true, Client = true },
+        Purchase = { Server = true, Client = false },
+        Prompt = { Server = false, Client = true },
+        MultiplierPurchase = { Server = true, Client = true },
+        TrackShop = { Server = true, Client = true },
     },
 
     Values = {
         -- 元件树复制测试已通过。
         ElementCopyTest = false,
+        GuideLineTest = false,
         -- 守护者追踪、命中停止和双方复位测试已通过。
         GuardianTrackTest = false,
         -- Root + KeepWorld 角色附加测试已通过。
@@ -85,7 +95,10 @@ local FeatureFlags = {
         HomeUpgrade = true,
         Treadmill = true,
         Rebirth = true,
-        Purchase = false,
+        Purchase = true,
+        Prompt = true,
+        MultiplierPurchase = true,
+        TrackShop = true,
     },
 }
 

@@ -83,7 +83,28 @@ function HotbarService:Start(context)
         return state
     end
 
+    local modelVersion = 0
+    local function SendModel(playerId, recipient, cleared)
+        local state = runtime.States[playerId]
+        local item = state and state.selectedItemId and inventory:GetItem(playerId, state.selectedItemId)
+        local models = {}
+        if not cleared and state and state.displayRootId and item and item.kind == "Chicken" then
+            models[1] = { rootId = state.displayRootId, finalSellPrice = item.finalSellPrice, chickenType = item.typeId }
+        elseif not cleared and state and state.displayRootId and item and item.kind == "Egg" then
+            models[1] = { kind = "Egg", rootId = state.displayRootId, eggTypeId = item.typeId, finalSellPrice = item.finalSellPrice }
+        end
+        modelVersion = modelVersion + 1
+        local message = { source = "hotbar", playerId = playerId, version = modelVersion, models = models }
+        if recipient then System:SendToClient(recipient, context.NetMsg.Messages.ChickenModelState, message)
+        else System:SendToAllClients(context.NetMsg.Messages.ChickenModelState, message) end
+    end
+    runtime.ModelSnapshotCallback = function(_, _, playerId)
+        if context.Services.HotbarService ~= runtime or not IsPositiveInteger(playerId) then return end
+        for ownerId in pairs(runtime.States) do SendModel(ownerId, playerId) end
+    end
+    runtime.ClearModel = function(playerId) SendModel(playerId, nil, true) end
     local function SendSnapshot(playerId)
+        SendModel(playerId)
         if not IsPositiveInteger(playerId) then return end
         local state = EnsureState(playerId)
         local visible = not zone:IsInStolenArea(playerId)
@@ -121,7 +142,7 @@ function HotbarService:Start(context)
         state.selectedItemId = nil
         state.displayRootId = nil
         state.busy = rootId ~= nil
-        if sendSnapshot ~= false then SendSnapshot(playerId) end
+        if sendSnapshot ~= false then SendSnapshot(playerId) else SendModel(playerId) end
 
         local function Complete()
             if state.operation ~= operation then return end
@@ -185,6 +206,17 @@ function HotbarService:Start(context)
 
         state.operation = state.operation + 1
         local operation = state.operation
+        local generation = inventory:GetSessionGeneration(playerId)
+        local function Current()
+            local latest = inventory:GetItem(playerId, itemId)
+            return context.Services.HotbarService == runtime and runtime.States[playerId] == state
+                and state.operation == operation and inventory:GetSessionGeneration(playerId) == generation
+                and latest ~= nil and latest.kind == item.kind and latest.typeId == item.typeId
+                and latest.finalSellPrice == item.finalSellPrice
+                and (item.kind ~= "Egg" or (latest.finalScale == item.finalScale
+                    and latest.finalScaleUnits == item.finalScaleUnits))
+                and not zone:IsInStolenArea(playerId)
+        end
         state.busy = true
         local targetPosition = Engine.Vector(
             playerPosition.X,
@@ -208,8 +240,7 @@ function HotbarService:Start(context)
                         "reason:", tostring(result.reason))
                     return
                 end
-                if state.operation ~= operation or zone:IsInStolenArea(playerId)
-                    or not inventory:HasItem(playerId, itemId) then
+                if not Current() then
                     DestroyRootNow(result.rootId, "stale_hotbar_copy")
                     return
                 end
@@ -228,11 +259,15 @@ function HotbarService:Start(context)
                 ), Element.COORDINATE.World)
 
                 context.Timers:AddFrame(HotbarService.Name, delayFrames, function()
-                    if state.operation ~= operation then
+                    if not Current() then
                         DestroyRootNow(result.rootId, "selection_changed_before_bind")
                         return
                     end
 
+                    Element:SetEnableCollision(result.rootId, false)
+                    if item.kind == "Egg" then
+                        Element:SetScale(result.rootId, Engine.Vector(item.finalScale, item.finalScale, item.finalScale))
+                    end
                     Element:BindingToCharacterOrCreature(
                         result.rootId,
                         playerId,
@@ -241,7 +276,7 @@ function HotbarService:Start(context)
                     )
 
                     context.Timers:AddFrame(HotbarService.Name, delayFrames, function()
-                        if state.operation ~= operation then
+                        if not Current() then
                             DestroyRootNow(result.rootId, "selection_changed_after_bind")
                             return
                         end
@@ -279,6 +314,7 @@ function HotbarService:Start(context)
         if not inventory:HasItem(playerId, itemId) or not IsPositiveInteger(rootId) then
             return false, "invalid_adopt_request"
         end
+        Element:SetEnableCollision(rootId, false)
         local state = EnsureState(playerId)
         local function Adopt()
             state.operation = state.operation + 1
@@ -403,6 +439,7 @@ function HotbarService:Start(context)
     )
 
     context.Services.HotbarService = runtime
+    System:BindNotify(context.NetMsg.Messages.ChickenModelSnapshotRequest, runtime.ModelSnapshotCallback)
     context.Events:Subscribe(HotbarService.Name, "ZoneChanged", function(snapshot)
         if snapshot.inStolenArea == true then
             CancelSelection(snapshot.playerId, "entered_stolen_area", nil, true)
@@ -442,7 +479,9 @@ function HotbarService:Stop(context)
     if runtime.PreleaveCallback then
         System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.PreleaveCallback)
     end
-    for _, state in pairs(runtime.States) do
+    System:UnbindNotify(context.NetMsg.Messages.ChickenModelSnapshotRequest, runtime.ModelSnapshotCallback)
+    for playerId, state in pairs(runtime.States) do
+        runtime.ClearModel(playerId)
         if state.displayRootId then
             pcall(function() Element:UnBinding(state.displayRootId) end)
             local rootId = state.displayRootId

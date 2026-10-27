@@ -35,6 +35,10 @@ local function ValidateTrackRequest(request)
     assert(type(request.guardianElementId) == "number", "guardianElementId 必须是 number")
     assert(type(request.triggerBoxId) == "number", "triggerBoxId 必须是 number")
     assert(type(request.targetElementId) == "number", "targetElementId 必须是 number")
+    assert(request.movementTargetId == nil or type(request.movementTargetId) == "number",
+        "movementTargetId 必须是 number 或 nil")
+    assert(request.returnTargetOnCaught == nil or type(request.returnTargetOnCaught) == "boolean",
+        "returnTargetOnCaught 必须是 boolean 或 nil")
     assert(IsVector(request.guardianReturnPosition), "guardianReturnPosition 必须是 Engine.Vector")
     assert(IsVector(request.targetReturnPosition), "targetReturnPosition 必须是 Engine.Vector")
     assert(type(request.initialSpeed) == "number", "initialSpeed 必须是 number")
@@ -53,6 +57,7 @@ local function BuildSnapshot(session, reason)
         guardianElementId = session.GuardianElementId,
         triggerBoxId = session.TriggerBoxId,
         targetElementId = session.TargetElementId,
+        movementTargetId = session.MovementTargetId,
         guardianReturnPosition = CopyVector(session.GuardianReturnPosition),
         targetReturnPosition = CopyVector(session.TargetReturnPosition),
         guardianPosition = Element:GetPosition(session.GuardianElementId),
@@ -159,7 +164,7 @@ function GuardianTrackingService:_HandleElementEnterTrigger(elementId, triggerBo
     local caughtSnapshot = BuildSnapshot(session, "target_entered_guardian_trigger")
     session.OnCaught(caughtSnapshot)
     if self._stopped or self._sessionsByGuardian[session.GuardianElementId] ~= session then return end
-    self:_ScheduleReturn(session, true, "target_entered_guardian_trigger")
+    self:_ScheduleReturn(session, session.ReturnTargetOnCaught, "target_entered_guardian_trigger")
 end
 
 function GuardianTrackingService:Start()
@@ -202,6 +207,9 @@ function GuardianTrackingService:TrackTarget(request)
         GuardianElementId = request.guardianElementId,
         TriggerBoxId = request.triggerBoxId,
         TargetElementId = request.targetElementId,
+        -- 旧测试调用仅传targetElementId；正式业务显式传移动目标，捕获/返场仍用TargetElementId。
+        MovementTargetId = request.movementTargetId or request.targetElementId,
+        ReturnTargetOnCaught = request.returnTargetOnCaught ~= false,
         GuardianReturnPosition = CopyVector(request.guardianReturnPosition),
         TargetReturnPosition = CopyVector(request.targetReturnPosition),
         OnCaught = request.onCaught,
@@ -215,7 +223,7 @@ function GuardianTrackingService:TrackTarget(request)
     local ok, errorMessage = xpcall(function()
         Element:TrackTarget(
             session.GuardianElementId,
-            session.TargetElementId,
+            session.MovementTargetId,
             request.initialSpeed,
             request.acceleration,
             request.maxVelocity,
@@ -231,6 +239,7 @@ function GuardianTrackingService:TrackTarget(request)
         request.debugName,
         "guardianId:", session.GuardianElementId,
         "targetId:", session.TargetElementId,
+        "movementTargetId:", session.MovementTargetId,
         "triggerBoxId:", session.TriggerBoxId)
     return true
 end
@@ -310,8 +319,8 @@ end
 
 function GuardianTrackingService:StopAndReturnGuardian(guardianElementId, reason, moveReturn)
     local session = self._sessionsByGuardian[guardianElementId]
-    -- 接近阶段尚无追踪会话；成功带回仍复用原两帧复位、两帧验证链。
-    if not session and self._movesByGuardian[guardianElementId] and moveReturn then
+    -- 接近/锚点重绑/切换等待尚无追踪会话；成功带回复用原两帧复位、两帧验证链。
+    if not session and moveReturn then
         assert(IsVector(moveReturn.guardianReturnPosition), "接近取消后缺少守护者返回位置")
         self:CancelGuardian(guardianElementId, reason)
         self._sequence = self._sequence + 1

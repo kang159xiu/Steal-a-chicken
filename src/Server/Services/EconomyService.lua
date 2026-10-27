@@ -21,7 +21,7 @@ function EconomyService:Start(context)
     function runtime:BeginLoadSession(playerId)
         self.Generation = self.Generation + 1
         self.Departed[playerId] = nil
-        self.Sessions[playerId] = { generation = self.Generation, balance = "0" }
+        self.Sessions[playerId] = { generation = self.Generation, balance = "0", coinMultiplier = 1, rebirthCoinHalfUnits = 0 }
         return self.Generation
     end
     function runtime:ClearPlayer(playerId)
@@ -44,16 +44,17 @@ function EconomyService:Start(context)
     end
     function runtime:ExportSnapshot(playerId, generation)
         if not self:IsCurrent(playerId, generation) then return nil, "session_unavailable" end
-        return { version = 1, balance = self:GetBalance(playerId) }
+        return { version = 2, balance = self:GetBalance(playerId), coinMultiplier = self.Sessions[playerId].coinMultiplier }
     end
     function runtime:RestoreSnapshot(playerId, generation, snapshot)
         if not self:IsCurrent(playerId, generation) then return false, "session_unavailable" end
-        if type(snapshot) ~= "table" or snapshot.version ~= 1 or not Decimal.IsValid(snapshot.balance) then
+        if type(snapshot) ~= "table" or snapshot.version ~= 2 or not Decimal.IsValid(snapshot.balance)
+            or not Integer(snapshot.coinMultiplier) or snapshot.coinMultiplier < 1 or snapshot.coinMultiplier > 4 then
             return false, "invalid_economy_snapshot"
         end
         local session = self.Sessions[playerId]
-        if session.restored or session.balance ~= "0" then return false, "economy_not_pristine" end
-        session.balance, session.restored = snapshot.balance, true
+        if session.restored or session.balance ~= "0" or session.coinMultiplier ~= 1 then return false, "economy_not_pristine" end
+        session.balance, session.coinMultiplier, session.restored = snapshot.balance, snapshot.coinMultiplier, true
         local notified = false
         return true, function()
             if notified then return false, "already_notified" end
@@ -64,6 +65,115 @@ function EconomyService:Start(context)
             end)
             if not ok then return false, "notification_failed:" .. tostring(err) end
             return true
+        end
+    end
+    -- 顺序永久档位即购买记录：1未买，2/3/4表示此前各档已兑现；只返回标量。
+    function runtime:GetCoinMultiplier(playerId)
+        local session = Active() and self.Sessions[playerId] or nil
+        return session and session.coinMultiplier or nil
+    end
+    function runtime:GetNextCoinMultiplier(playerId)
+        local multiplier = self:GetCoinMultiplier(playerId)
+        if not multiplier then return nil, "session_unavailable" end
+        if multiplier == 4 then return nil, "coin_multiplier_max" end
+        return multiplier + 1
+    end
+    -- 成长是重生次数唯一权威；这里只接收派生半倍单位，不导出到经济子档。
+    -- 恢复时尚未Ready也需同步，故只校验会话/数值/批次；不修改任何资产或发布事件。
+    -- 正常重生由协调方在同次无等待提交中同步，全部状态提交后沿原通知链刷新。
+    function runtime:SyncRebirthCoinBonus(playerId, generation, rebirthCount)
+        if not self:IsCurrent(playerId, generation) then return false, "session_unavailable" end
+        if not Integer(rebirthCount) or rebirthCount > 20 then return false, "invalid_rebirth_count" end
+        local session = self.Sessions[playerId]
+        if session.saleBatch then return false, "sale_batch_busy" end
+        session.rebirthCoinHalfUnits = rebirthCount
+        return true
+    end
+    function runtime:GetFinalCoinMultiplier(playerId)
+        local session = Active() and self.Sessions[playerId] or nil
+        if not session then return nil end
+        return session.coinMultiplier + session.rebirthCoinHalfUnits / 2
+    end
+    -- 逐位除2，避免将整件收益转成浮点；舍弃余数即向下取整。
+    local function HalfFloor(text)
+        local digits, carry = {}, 0
+        for i = 1, #text do
+            local value = carry * 10 + text:byte(i) - 48
+            digits[#digits + 1] = string.char(48 + math.floor(value / 2))
+            carry = value % 2
+        end
+        local result = table.concat(digits):gsub("^0+", "")
+        return result == "" and "0" or result
+    end
+    -- 售价与结算共用精确字符串；不改物品原价，也不影响测试加钱。
+    function runtime:GetSalePrice(playerId, item)
+        local session = Active() and self.Sessions[playerId] or nil
+        if not session or not item or item.count ~= 1
+            or (item.kind ~= "Chicken" and item.kind ~= "Egg") then return nil end
+        local base = Decimal.FromSafeInteger(item.finalSellPrice)
+        if not base then return nil end
+        local halfUnits = session.coinMultiplier * 2 + session.rebirthCoinHalfUnits
+        local doubledPrice = base
+        for _ = 2, halfUnits do doubledPrice = Decimal.Add(doubledPrice, base) end
+        return HalfFloor(doubledPrice)
+    end
+    -- 两类倍率协调方扣凭证前共用的只读检查；不占用提交token或改变任何状态。
+    function runtime:CanPurchaseMultiplier(playerId, generation)
+        if not self:IsCurrent(playerId, generation) then return false, "session_unavailable" end
+        if not CanMutate(playerId) then return false, "persistence_not_ready" end
+        if self.Sessions[playerId].saleBatch then return false, "sale_batch_busy" end
+        return true
+    end
+    -- 扣凭证之前准备并复核；准备无资产副作用，提交为一次无等待Lua操作。
+    function runtime:PrepareCoinMultiplierCommit(playerId, generation, target)
+        if not self:IsCurrent(playerId, generation) then return nil, "session_unavailable" end
+        if not CanMutate(playerId) then return nil, "persistence_not_ready" end
+        local session = self.Sessions[playerId]
+        if session.saleBatch then return nil, "sale_batch_busy" end
+        if not Integer(target) or target ~= session.coinMultiplier + 1 or target > 4 then
+            return nil, "invalid_coin_multiplier_step"
+        end
+        local expected, token = session.coinMultiplier, {}
+        session.coinPurchase = token
+        local attempted = false
+        return function()
+            if attempted then return false, "coin_purchase_already_attempted" end
+            attempted = true
+            if not self:IsCurrent(playerId, generation) or self.Sessions[playerId] ~= session
+                or session.coinPurchase ~= token or session.coinMultiplier ~= expected then return false, "coin_purchase_expired" end
+            session.coinPurchase = nil
+            if not CanMutate(playerId) then return false, "persistence_not_ready" end
+            if session.saleBatch then return false, "sale_batch_busy" end
+            session.coinMultiplier = target
+            local notified = false
+            return true, function()
+                if notified then return false, "already_notified" end
+                notified = true
+                if not self:IsCurrent(playerId, generation) or self.Sessions[playerId] ~= session then return false, "session_unavailable" end
+                -- 普通余额事件可延迟保存；永久金币购买提交后必须单独安排即时保存。
+                local okEvent, eventError = pcall(function()
+                    context.Events:Publish("EconomyChanged", { playerId = playerId, sessionGeneration = generation,
+                        balance = session.balance, coinMultiplier = session.coinMultiplier })
+                end)
+                -- 即使通知异常也尝试保存；通知回调可能改变会话，不能标脏新会话。
+                if not self:IsCurrent(playerId, generation) or self.Sessions[playerId] ~= session then return false, "session_unavailable" end
+                local okSave, saved, saveError = pcall(function()
+                    if not GameConfig.Persistence.ProductionEnabled then return true end
+                    if not CanMutate(playerId) then return false, "persistence_not_ready" end
+                    return context.Services.PersistenceService:MarkDirty(playerId, "coin_multiplier_purchase")
+                end)
+                if not okSave or saved ~= true then
+                    Log:PrintError("[EconomyService] 倍率提交后即时保存安排失败，不重兑", "playerId:", playerId,
+                        "generation:", generation, "target:", target, "error:", tostring(okSave and saveError or saved))
+                end
+                if not okEvent then
+                    Log:PrintError("[EconomyService] 倍率提交后通知失败，不重兑", "playerId:", playerId,
+                        "generation:", generation, "target:", target, "error:", tostring(eventError))
+                    return false, "notification_failed"
+                end
+                if not okSave or saved ~= true then return false, "save_schedule_failed" end
+                return true
+            end
         end
     end
     function runtime:BeginSaleBatch(playerId, generation)
@@ -88,7 +198,7 @@ function EconomyService:Start(context)
             return false, "session_unavailable"
         end
         local session = self.Sessions[playerId]
-        local amountText = Decimal.FromSafeInteger(amount)
+        local amountText = Decimal.IsValid(amount) and amount or nil
         if not amountText then
             return false, "invalid_sale_amount"
         end
@@ -155,12 +265,51 @@ function EconomyService:Start(context)
             return true
         end
     end
+    -- 两种重生共用：准备不改余额；协调方准备好其他模块后，在同一无等待提交段调用。
+    -- 新准备使旧闭包失效；闭包只清当前会话提交时的余额，不携带可回写的旧余额。
+    function runtime:PrepareRebirthReset(playerId, generation)
+        if not self:IsCurrent(playerId, generation) then return nil, "session_unavailable" end
+        if not CanMutate(playerId) then return nil, "persistence_not_ready" end
+        local session = self.Sessions[playerId]
+        if session.saleBatch then return nil, "sale_batch_busy" end
+        local token = {}
+        session.rebirthReset = token
+        local attempted = false
+        return function()
+            if attempted then return false, "reset_already_attempted" end
+            attempted = true
+            if not self:IsCurrent(playerId, generation) or self.Sessions[playerId] ~= session
+                or session.rebirthReset ~= token then return false, "reset_expired" end
+            session.rebirthReset = nil
+            if not CanMutate(playerId) then return false, "persistence_not_ready" end
+            if session.saleBatch then return false, "sale_batch_busy" end
+            session.balance = "0"
+            local notified = false
+            return true, function()
+                if notified then return false, "already_notified" end
+                notified = true
+                if not self:IsCurrent(playerId, generation) or self.Sessions[playerId] ~= session then
+                    return false, "session_unavailable"
+                end
+                local ok, err = pcall(function()
+                    context.Events:Publish("EconomyChanged", { playerId = playerId,
+                        sessionGeneration = generation, balance = session.balance })
+                end)
+                if not ok then
+                    Log:PrintError("[EconomyService] 重生清零后通知失败，不重试", "playerId:", playerId,
+                        "sessionGeneration:", generation, "error:", tostring(err))
+                    return false, "notification_failed"
+                end
+                return true
+            end
+        end
+    end
     local function Join(playerId, reset)
         if not Active() or not Integer(playerId) or playerId == 0 then return end
         if runtime.Sessions[playerId] and not reset then return end
         runtime.Departed[playerId] = nil
         runtime.Generation = runtime.Generation + 1
-        runtime.Sessions[playerId] = { generation = runtime.Generation, balance = "0" }
+        runtime.Sessions[playerId] = { generation = runtime.Generation, balance = "0", coinMultiplier = 1, rebirthCoinHalfUnits = 0 }
         context.Events:Publish("EconomyChanged", { playerId = playerId, sessionGeneration = runtime.Generation, balance = "0" })
     end
     runtime.EnterCallback = function(playerId) Join(playerId, false) end
