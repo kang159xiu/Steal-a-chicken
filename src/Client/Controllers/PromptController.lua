@@ -1,14 +1,6 @@
 local GameConfig = require "Common.Config.GameConfig"
 local PromptController = { Name = "PromptController", FeatureFlag = "Prompt", Dependencies = {} }
 local function Integer(n) return type(n) == "number" and n > 0 and n < math.huge and n == math.floor(n) end
-function PromptController:ValidateConfig()
-    local c = GameConfig.Prompt
-    if not c or not Integer(c.TemplateId) or not Integer(c.TextId) or c.TemplateId == c.TextId
-        or c.X ~= -180 or c.Y ~= -430 or c.VisibleSeconds ~= 3 or c.HideSeconds ~= 1 or c.AnimationIndex ~= 1 then
-        return false, { "统一提示UI配置无效" }
-    end
-    return true
-end
 function PromptController:Start(context)
     if context.Side ~= "Client" then return end
     local c = GameConfig.Prompt

@@ -3,6 +3,7 @@ local GameConfig = require "Common.Config.GameConfig"
 local ChickenValueController = require "Client.Controllers.ChickenValueController"
 local PersistenceController = require "Client.Controllers.PersistenceController"
 local PromptController = require "Client.Controllers.PromptController"
+local ChickenObtainedController = require "Client.Controllers.ChickenObtainedController"
 local RefreshController = require "Client.Controllers.RefreshController"
 local FeatureFlags = require "Common.Config.FeatureFlags"
 local NetMsg = require "Common.NetMsg"
@@ -10,14 +11,7 @@ local ElementCopy = require "Common.ElementCopy"
 local EventBus = require "Common.Core.EventBus"
 local TimerRegistry = require "Common.Core.TimerRegistry"
 local ModuleManager = require "Common.Core.ModuleManager"
-local ElementCopyTest = require "Common.Debug.ElementCopyTest"
 local GuideLineTest = require "Client.Debug.GuideLineTest"
-local GuardianTrackTest = require "Common.Debug.GuardianTrackTest"
-local CharacterBindingTest = require "Common.Debug.CharacterBindingTest"
-local GuardianCarryIntegrationTest = require "Common.Debug.GuardianCarryIntegrationTest"
-local ZoneTriggerTest = require "Common.Debug.ZoneTriggerTest"
-local PickupInteractionTest = require "Common.Debug.PickupInteractionTest"
-local HomeAssignmentTest = require "Common.Debug.HomeAssignmentTest"
 local AvatarPictureBoardTest = require "Common.Debug.AvatarPictureBoardTest"
 local AvatarReadTest = require "Common.Debug.AvatarReadTest"
 local PickupController = require "Client.Controllers.PickupController"
@@ -34,7 +28,6 @@ local TrackShopController = require "Client.Controllers.TrackShopController"
 local EggGrowthController = require "Client.Controllers.EggGrowthController"
 local EggCollectionController = require "Client.Controllers.EggCollectionController"
 local EggCollectionListController = require "Client.Controllers.EggCollectionListController"
-local HotbarClickTest = require "Common.Debug.HotbarClickTest"
 
 local GameClient = {
     Context = nil,
@@ -65,19 +58,13 @@ function GameClient:Init()
     Log:PrintLog("[GameClient:Init]")
     self.Context = CreateClientContext()
 
-    self.Context.Manager:Register(ElementCopyTest)
     self.Context.Manager:Register(GuideLineTest)
-    self.Context.Manager:Register(GuardianTrackTest)
-    self.Context.Manager:Register(CharacterBindingTest)
-    self.Context.Manager:Register(GuardianCarryIntegrationTest)
-    self.Context.Manager:Register(ZoneTriggerTest)
-    self.Context.Manager:Register(PickupInteractionTest)
-    self.Context.Manager:Register(HomeAssignmentTest)
     self.Context.Manager:Register(AvatarPictureBoardTest)
     self.Context.Manager:Register(AvatarReadTest)
     if FeatureFlags.Values.Guardian then self.Context.Manager:Register(GuardianDiagnosticController) end
     self.Context.Manager:Register(PromptController)
     self.Context.Manager:Register(PersistenceController)
+    self.Context.Manager:Register(ChickenObtainedController)
     self.Context.Manager:Register(PickupController)
     self.Context.Manager:Register(HotbarController)
     self.Context.Manager:Register(ChickenValueController)
@@ -94,7 +81,6 @@ function GameClient:Init()
     self.Context.Manager:Register(EggCollectionController)
     self.Context.Manager:Register(EggCollectionListController)
     if GameConfig.Refresh.Enabled then self.Context.Manager:Register(RefreshController) end
-    self.Context.Manager:Register(HotbarClickTest)
 
     local initialized = self.Context.Manager:Init(self.Context)
     if not initialized then

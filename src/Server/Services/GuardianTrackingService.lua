@@ -3,12 +3,7 @@
 local GuardianTrackingService = {}
 GuardianTrackingService.__index = GuardianTrackingService
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
 local function IsVector(value)
     return value ~= nil
@@ -35,6 +30,8 @@ local function ValidateTrackRequest(request)
     assert(type(request.guardianElementId) == "number", "guardianElementId 必须是 number")
     assert(type(request.triggerBoxId) == "number", "triggerBoxId 必须是 number")
     assert(type(request.targetElementId) == "number", "targetElementId 必须是 number")
+    assert(request.targetPlayerId == nil or type(request.targetPlayerId) == "number", "targetPlayerId 必须是 number 或 nil")
+    assert(type(request.canCatch) == "function", "canCatch 必须是 function")
     assert(request.movementTargetId == nil or type(request.movementTargetId) == "number",
         "movementTargetId 必须是 number 或 nil")
     assert(request.returnTargetOnCaught == nil or type(request.returnTargetOnCaught) == "boolean",
@@ -57,6 +54,7 @@ local function BuildSnapshot(session, reason)
         guardianElementId = session.GuardianElementId,
         triggerBoxId = session.TriggerBoxId,
         targetElementId = session.TargetElementId,
+        targetPlayerId = session.TargetPlayerId,
         movementTargetId = session.MovementTargetId,
         guardianReturnPosition = CopyVector(session.GuardianReturnPosition),
         targetReturnPosition = CopyVector(session.TargetReturnPosition),
@@ -145,26 +143,28 @@ function GuardianTrackingService:_ScheduleReturn(session, returnTarget, reason)
     end)
 end
 
-function GuardianTrackingService:_HandleElementEnterTrigger(elementId, triggerBoxId)
+function GuardianTrackingService:_HandleCharacterEnterTrigger(playerId, triggerBoxId)
+    if self._stopped then return end
     local session = self._sessionsByTrigger[triggerBoxId]
     if not session or session.State ~= "Tracking" then
         return
     end
-    if elementId ~= session.TargetElementId then
+    if not session.TargetPlayerId or playerId ~= session.TargetPlayerId then
         return
     end
-    if TriggerBox:IsElementInTriggerBox(session.TargetElementId, session.TriggerBoxId) ~= true then
+    if TriggerBox:IsCharacterInTriggerBox(playerId, session.TriggerBoxId) ~= true then
         return
     end
+    if not session.CanCatch() then return end
 
     self._sessionsByTrigger[session.TriggerBoxId] = nil
     session.State = "Caught"
     Element:StopTracking(session.GuardianElementId)
 
-    local caughtSnapshot = BuildSnapshot(session, "target_entered_guardian_trigger")
+    local caughtSnapshot = BuildSnapshot(session, "player_entered_guardian_trigger")
     session.OnCaught(caughtSnapshot)
     if self._stopped or self._sessionsByGuardian[session.GuardianElementId] ~= session then return end
-    self:_ScheduleReturn(session, session.ReturnTargetOnCaught, "target_entered_guardian_trigger")
+    self:_ScheduleReturn(session, session.ReturnTargetOnCaught, "player_entered_guardian_trigger")
 end
 
 function GuardianTrackingService:Start()
@@ -173,15 +173,15 @@ function GuardianTrackingService:Start()
         return false, "already_started"
     end
 
-    self._triggerCallback = function(elementId, triggerBoxId)
+    self._triggerCallback = function(playerId, triggerBoxId)
         local ok, errorMessage = xpcall(function()
-            self:_HandleElementEnterTrigger(elementId, triggerBoxId)
+            self:_HandleCharacterEnterTrigger(playerId, triggerBoxId)
         end, Traceback)
         if not ok then
             self._onError(errorMessage)
         end
     end
-    System:RegisterEvent(Events.ON_ELEMENT_ENTER_TRIGGER, self._triggerCallback)
+    System:RegisterEvent(Events.ON_CHARACTER_ENTER_SIGNAL_BOX, self._triggerCallback)
     self._started = true
     return true
 end
@@ -207,7 +207,9 @@ function GuardianTrackingService:TrackTarget(request)
         GuardianElementId = request.guardianElementId,
         TriggerBoxId = request.triggerBoxId,
         TargetElementId = request.targetElementId,
-        -- 旧测试调用仅传targetElementId；正式业务显式传移动目标，捕获/返场仍用TargetElementId。
+        TargetPlayerId = request.targetPlayerId,
+        CanCatch = request.canCatch,
+        -- 玩家负责抓获判定，鸡根保留身份及返场信息，移动目标为Root锚点。
         MovementTargetId = request.movementTargetId or request.targetElementId,
         ReturnTargetOnCaught = request.returnTargetOnCaught ~= false,
         GuardianReturnPosition = CopyVector(request.guardianReturnPosition),
@@ -369,7 +371,7 @@ function GuardianTrackingService:Stop()
     self._stopped = true
 
     if self._triggerCallback then
-        System:UnregisterEvent(Events.ON_ELEMENT_ENTER_TRIGGER, self._triggerCallback)
+        System:UnregisterEvent(Events.ON_CHARACTER_ENTER_SIGNAL_BOX, self._triggerCallback)
         self._triggerCallback = nil
     end
 

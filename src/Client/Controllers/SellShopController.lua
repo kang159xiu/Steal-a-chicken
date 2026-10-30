@@ -1,4 +1,5 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 local Decimal = require "Common.DecimalInteger"
 local SellShopController = { Name = "SellShopController", FeatureFlag = "SellShop", Dependencies = {} }
 local function MoneyText(value)
@@ -6,19 +7,6 @@ local function MoneyText(value)
 end
 local function Integer(value)
     return type(value) == "number" and value >= 0 and value < math.huge and value == math.floor(value)
-end
-function SellShopController:ValidateConfig()
-    local c = GameConfig.SellShop
-    local errors = {}
-    if type(c) == "table" and c.TestMoneyEnabled == true
-        and (not Integer(c.TestMoneyButtonId) or c.TestMoneyButtonId == 0) then
-        errors[#errors + 1] = "测试加钱按钮配置无效"
-    end
-    for _, key in ipairs({ "EggListId", "ChickenListId", "TemplateId", "ImageId", "PriceTextId",
-        "AppearanceButtonId", "SelectedBorderId", "SellAllEggsButtonId", "SellAllChickensButtonId", "BalanceTextId" }) do
-        if not c or not Integer(c[key]) or c[key] == 0 then errors[#errors + 1] = "SellShop." .. key .. " 必须是正整数" end
-    end
-    return #errors == 0, errors
 end
 function SellShopController:Start(context)
     if context.Side ~= "Client" then return end
@@ -31,15 +19,10 @@ function SellShopController:Start(context)
     context.Services.SellShopController = runtime
     local function Active() return runtime.Active and context.Services.SellShopController == runtime end
     local function Protect(callback)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function Current(list, row)
-        return Active() and runtime.Ready and row.sessionGeneration == runtime.SessionGeneration
+        return Active() and runtime.Ready
             and list.rows[row.data.itemId] == row and list.byItem[row.listItemId] == row
     end
     local function Paint(list, row)
@@ -95,14 +78,19 @@ function SellShopController:Start(context)
             end
         end
     end
+    local function SetBalanceText(text)
+        if runtime.BalanceText == text then return end
+        UI:SetText({ c.BalanceTextId }, text, false)
+        runtime.BalanceText = text
+    end
     local function Render()
         if not runtime.Ready or not runtime.Snapshot then return end
-        UI:SetText({ c.BalanceTextId }, MoneyText(runtime.Snapshot.balance), false)
+        SetBalanceText(MoneyText(runtime.Snapshot.balance))
         RenderList(runtime.Lists[c.ChickenListId], runtime.Snapshot.chickens)
         RenderList(runtime.Lists[c.EggListId], runtime.Snapshot.eggs)
     end
     local function Request(action, itemId)
-        if not runtime.Ready or runtime.SessionGeneration == 0 then return end
+        if not runtime.Ready then return end
         runtime.RequestId = runtime.RequestId + 1
         local request = { sessionGeneration = runtime.SessionGeneration, requestId = runtime.RequestId, action = action, itemId = itemId }
         runtime.Pending[request.requestId] = request
@@ -112,8 +100,7 @@ function SellShopController:Start(context)
         list.SetCallback = Protect(function(listId, listItemId, data)
             if listId ~= list.id or type(data) ~= "table" then return end
             local row = list.rows[data.itemId]
-            if not row or data.rowGeneration ~= row.generation or data.sessionGeneration ~= row.sessionGeneration
-                or row.sessionGeneration ~= runtime.SessionGeneration
+            if not row or data.rowGeneration ~= row.generation
                 or (row.listItemId and row.listItemId ~= listItemId)
                 or (list.byItem[listItemId] and list.byItem[listItemId] ~= row) then return end
             row.listItemId = listItemId
@@ -134,7 +121,7 @@ function SellShopController:Start(context)
             local row = list.rows[data.itemId]
             if not row or not Current(list, row) or not row.landed
                 or row.listItemId ~= listItemId or row.generation ~= data.rowGeneration
-                or row.sessionGeneration ~= data.sessionGeneration then return end
+                then return end
             local itemId = row.data.itemId
             UI:ClearListViewSelection(list.id)
             if Current(list, row) then Request("single", itemId) end
@@ -142,12 +129,10 @@ function SellShopController:Start(context)
         -- 先保存回调引用；涉及UI实例的注册与初始化在启动延迟后执行。
     end
     runtime.StateCallback = Protect(function(_, message)
-        if type(message) ~= "table" or not Integer(message.sessionGeneration) or message.sessionGeneration == 0
+        if type(message) ~= "table"
             or not Integer(message.version) or message.version == 0 or not Decimal.IsValid(message.balance)
             or type(message.chickens) ~= "table" or type(message.eggs) ~= "table" then error("出售快照格式无效") end
-        if message.sessionGeneration < runtime.SessionGeneration
-            or (message.sessionGeneration == runtime.SessionGeneration and message.version <= runtime.Version) then return end
-        if runtime.DepartedGeneration and message.sessionGeneration <= runtime.DepartedGeneration then return end
+        if message.version <= runtime.Version then return end
         for _, group in ipairs({ { message.chickens, "Chicken" }, { message.eggs, "Egg" } }) do
             local seen = {}
             for _, item in ipairs(group[1]) do
@@ -157,13 +142,12 @@ function SellShopController:Start(context)
                 seen[item.itemId] = true
             end
         end
-        if message.sessionGeneration ~= runtime.SessionGeneration then Reset() end
         runtime.SessionGeneration, runtime.Version = message.sessionGeneration, message.version
         runtime.Snapshot = message
         Render()
     end)
     runtime.ResultCallback = Protect(function(_, message)
-        if type(message) ~= "table" or message.sessionGeneration ~= runtime.SessionGeneration then return end
+        if type(message) ~= "table" then return end
         if not Decimal.IsValid(message.balance) or not Decimal.IsValid(message.total) then error("出售结果钱币格式无效") end
         local request = runtime.Pending[message.requestId]
         if not request or request.action ~= message.action or request.itemId ~= message.itemId then return end
@@ -184,11 +168,13 @@ function SellShopController:Start(context)
     runtime.LeaveCallback = Protect(function(playerId)
         if playerId ~= Character:GetLocalPlayerId() then return end
         runtime.DepartedGeneration = runtime.SessionGeneration
+        runtime.Version = 0
         runtime.Snapshot = nil
         Reset()
-        if runtime.Ready then UI:SetText({ c.BalanceTextId }, "0", false) end
+        if runtime.Ready then SetBalanceText("0") end
     end)
     System:RegisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback)
+    System:RegisterEvent(Events.ON_PLAYER_RECONNECTED, runtime.LeaveCallback)
     context.Timers:AddTimer(self.Name, GameConfig.Runtime.ClientSnapshotRequestDelaySeconds, Protect(function()
         local parentId = System:GetScriptParentID()
         runtime.Images.Chicken = CustomProperty:GetCustomPropertyArray(parentId, GameConfig.ImageGroups.ChickenPropertyName, CustomProperty.PROPERTY_TYPE.Image) or {}
@@ -208,7 +194,7 @@ function SellShopController:Start(context)
             runtime.TestMoneyBound = true
         end
         runtime.Ready = true
-        if not runtime.Snapshot then UI:SetText({ c.BalanceTextId }, "0", false) end
+        if not runtime.Snapshot then SetBalanceText("0") end
         Render()
         System:SendToServer(messages.SellShopSnapshotRequest, {})
     end))
@@ -235,6 +221,7 @@ function SellShopController:Stop(context)
     System:UnbindNotify(m.SellShopState, runtime.StateCallback)
     System:UnbindNotify(m.SellShopResult, runtime.ResultCallback)
     System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback)
+    System:UnregisterEvent(Events.ON_PLAYER_RECONNECTED, runtime.LeaveCallback)
     context.Timers:RemoveOwner(self.Name)
     context.Services.SellShopController = nil
 end

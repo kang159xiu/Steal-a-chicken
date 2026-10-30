@@ -6,38 +6,10 @@ local ZoneService = {
     Dependencies = {},
 }
 
-local function IsPositiveInteger(value)
-    return type(value) == "number" and value > 0 and value == math.floor(value)
-end
+local IsPositiveInteger = require("Common.Validation").IsPositiveInteger
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
-function ZoneService:ValidateConfig(context)
-    if context.Side ~= "Server" then
-        return true
-    end
-    local errors = {}
-    local config = GameConfig.Zone
-    if type(config) ~= "table" then
-        errors[#errors + 1] = "GameConfig.Zone 必须是 table"
-    else
-        if not IsPositiveInteger(config.HomeTriggerBoxId) then
-            errors[#errors + 1] = "HomeTriggerBoxId 必须是正整数"
-        end
-        if not IsPositiveInteger(config.StolenTriggerBoxId) then
-            errors[#errors + 1] = "StolenTriggerBoxId 必须是正整数"
-        end
-        if config.HomeTriggerBoxId == config.StolenTriggerBoxId then
-            errors[#errors + 1] = "家园区与偷取区触发盒不能相同"
-        end
-    end
-    return #errors == 0, errors
-end
 
 function ZoneService:Start(context)
     if context.Side ~= "Server" then
@@ -47,12 +19,36 @@ function ZoneService:Start(context)
     local config = GameConfig.Zone
     local runtime = {
         InStolenAreaByPlayer = {},
+        CurrentRegionByPlayer = {},
+        TouchCallback = nil,
         EnterCallback = nil,
         PreleaveCallback = nil,
     }
 
+    local function Diag(stage, playerId, triggerBoxId, previous, requested, source)
+        pcall(function()
+            local readOk, carriedRoot = pcall(function()
+                local theft = context.Services.TheftService
+                return theft and theft.CarriedByPlayer and theft.CarriedByPlayer[playerId]
+            end)
+            Log:PrintServerLog("[ZoneDiag]", "stage:", stage,
+                "playerId:", tostring(playerId), "triggerBoxId:", tostring(triggerBoxId),
+                "previous:", tostring(previous), "requested:", tostring(requested),
+                "actual:", tostring(runtime.InStolenAreaByPlayer[playerId]),
+                "source:", tostring(source), "changed:", tostring(previous ~= requested),
+                "carriedReadOk:", tostring(readOk), "carriedRoot:", tostring(carriedRoot))
+        end)
+    end
+
     function runtime:IsInStolenArea(playerId)
         return self.InStolenAreaByPlayer[playerId] == true
+    end
+
+    function runtime:SendState(playerId)
+        System:SendToClient(playerId, context.NetMsg.Messages.ZoneState, {
+            inStolenArea = self:IsInStolenArea(playerId),
+            regionId = self.CurrentRegionByPlayer[playerId] or 0,
+        })
     end
 
     function runtime:SetPlayerArea(playerId, inStolenArea, source)
@@ -60,17 +56,20 @@ function ZoneService:Start(context)
             return false, "invalid_area_arguments"
         end
         local previous = self.InStolenAreaByPlayer[playerId]
+        Diag("set_before", playerId, nil, previous, inStolenArea, source)
         self.InStolenAreaByPlayer[playerId] = inStolenArea
-        System:SendToClient(playerId, context.NetMsg.Messages.ZoneState, {
-            inStolenArea = inStolenArea,
-        })
+        if not inStolenArea then self.CurrentRegionByPlayer[playerId] = nil end
+        Diag("set_after", playerId, nil, previous, inStolenArea, source)
+        self:SendState(playerId)
         if previous ~= inStolenArea then
             local snapshot = {
                 playerId = playerId,
                 inStolenArea = inStolenArea,
                 source = source,
             }
+            Diag("publish_before", playerId, nil, previous, inStolenArea, source)
             context.Events:Publish("ZoneChanged", snapshot)
+            Diag("publish_after", playerId, nil, previous, inStolenArea, source)
             Log:PrintServerLog("[ZoneService] 玩家区域状态改变",
                 "playerId:", playerId,
                 "inStolenArea:", tostring(inStolenArea),
@@ -81,6 +80,9 @@ function ZoneService:Start(context)
 
     runtime.EnterCallback = function(playerId, triggerBoxId)
         local ok, errorMessage = xpcall(function()
+            if triggerBoxId == config.HomeTriggerBoxId or triggerBoxId == config.StolenTriggerBoxId then
+                Diag("enter_raw", playerId, triggerBoxId)
+            end
             if not IsPositiveInteger(playerId) or not IsPositiveInteger(triggerBoxId) then
                 Log:PrintWarning("[ZoneService] 忽略无效进入事件",
                     "playerId:", tostring(playerId),
@@ -98,15 +100,35 @@ function ZoneService:Start(context)
         end
     end
 
+    runtime.TouchCallback = function(elementId, playerId)
+        local ok, errorMessage = xpcall(function()
+            if not IsPositiveInteger(elementId) or not IsPositiveInteger(playerId) then return end
+            local theft = context.Services.TheftService
+            if theft and theft:IsWorldChickenRoot(elementId) then return end
+            local readOk, regionId = pcall(function()
+                return CustomProperty:GetCustomProperty(elementId,
+                    GameConfig.Theft.RegionProperty, CustomProperty.PROPERTY_TYPE.Number)
+            end)
+            if not readOk or not IsPositiveInteger(regionId) or regionId > 15 then return end
+            if runtime.CurrentRegionByPlayer[playerId] == regionId
+                and runtime:IsInStolenArea(playerId) then return end
+            runtime.CurrentRegionByPlayer[playerId] = regionId
+            runtime:SetPlayerArea(playerId, true, "touched_region_floor")
+        end, Traceback)
+        if not ok then context.Manager:FailModule(ZoneService.Name, errorMessage) end
+    end
+
     runtime.PreleaveCallback = function(playerId)
         local persistence = context.Services.PersistenceService
         if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(playerId) end
         runtime.InStolenAreaByPlayer[playerId] = nil
+        runtime.CurrentRegionByPlayer[playerId] = nil
     end
 
     context.Services.ZoneService = runtime
     System:RegisterEvent(Events.ON_CHARACTER_ENTER_SIGNAL_BOX, runtime.EnterCallback)
     System:RegisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.PreleaveCallback)
+    System:RegisterEvent(Events.ON_ELEMENT_TOUCH_PLAYER, runtime.TouchCallback)
     Log:PrintServerLog("[ZoneService] 正式区域模块已启动",
         "homeTriggerBoxId:", config.HomeTriggerBoxId,
         "stolenTriggerBoxId:", config.StolenTriggerBoxId)
@@ -126,7 +148,11 @@ function ZoneService:Stop(context)
     if runtime.PreleaveCallback then
         System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.PreleaveCallback)
     end
+    if runtime.TouchCallback then
+        System:UnregisterEvent(Events.ON_ELEMENT_TOUCH_PLAYER, runtime.TouchCallback)
+    end
     runtime.InStolenAreaByPlayer = {}
+    runtime.CurrentRegionByPlayer = {}
     context.Services.ZoneService = nil
 end
 

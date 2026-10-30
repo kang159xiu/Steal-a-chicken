@@ -1,15 +1,10 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 
 local EggCollectionService = { Name = "EggCollectionService", FeatureFlag = "EggCollection",
     Dependencies = { "HomeService", "EggProductionService", "InventoryService" } }
 local function Integer(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
-end
-function EggCollectionService:ValidateConfig(context)
-    local config = GameConfig.EggCollection
-    if type(config) ~= "table" or config.UiGroupId ~= 100084 or config.CollectButtonId ~= 100083
-        or config.MaxDistance ~= 300 then return false, { "EggCollection 必须使用UI100084/100083及三维范围300" } end
-    return true
 end
 
 function EggCollectionService:Start(context)
@@ -21,14 +16,7 @@ function EggCollectionService:Start(context)
     context.Services.EggCollectionService = runtime
     local function Active() return not runtime.Stopped and context.Services.EggCollectionService == runtime end
     local function Protect(callback)
-        return function(...)
-            if not Active() then
-                return
-            end
-            local args = { n = select("#", ...), ... }
-            local ok, errorMessage = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(errorMessage)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function NextVersion() runtime.Sequence = runtime.Sequence + 1; return runtime.Sequence end
     -- 仅保存输入代次；场景蛋始终读取产蛋服务快照。
@@ -348,7 +336,7 @@ function EggCollectionService:Start(context)
         local persistence = context.Services.PersistenceService
         if not runtime.Ready or not Integer(playerId) or runtime.ListDeparted[playerId]
             or not persistence or not persistence:IsReady(playerId)
-            or persistence:GetState(playerId).generation ~= state.generation then return end
+            then return end
         local snapshot = eggs:GetEggSnapshot(playerId)
         if not snapshot or snapshot.homeId ~= home:GetPlayerHome(playerId)
             or not home:IsOwner(playerId, snapshot.homeId) then return end
@@ -379,12 +367,6 @@ function EggCollectionService:Start(context)
             for _, egg in ipairs(snapshot and snapshot.eggs or {}) do QueueIndex(egg) end
             SendList(playerId)
         end
-    end)
-    context.Timers:AddLoopFrame(self.Name, 1, function()
-        if not Active() or not runtime.Ready then return end
-        local players = {}
-        for playerId in pairs(runtime.Targets) do players[#players + 1] = playerId end
-        for _, playerId in ipairs(players) do Refresh(playerId) end
     end)
     runtime.Cleanup = function()
         -- 关闭通知在失效前发送；之后旧碰撞、请求和两帧回调均无效。

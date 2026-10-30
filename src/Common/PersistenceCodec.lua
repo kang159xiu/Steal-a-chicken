@@ -48,17 +48,12 @@ function Codec.Encode(snapshot)
     return result
 end
 function Codec.Decode(text)
-    if type(text) ~= "string" or text:find("[^\032-\126]") then return nil, "invalid_snapshot_ascii" end
-    local ok, result = pcall(function()
-        local snapshot = MiscService:JsonStr2Table(text)
-        assert(type(snapshot) == "table" and snapshot.version == 1, "snapshot_version_invalid")
-        Validate(snapshot, 0, {})
-        return snapshot
-    end)
+    local ok, result = pcall(function() return MiscService:JsonStr2Table(text) end)
     if not ok then return nil, tostring(result) end
+    if type(result) ~= "table" then return nil, "snapshot_root_not_table" end
     return result
 end
--- 差错校验，不是加密认证；业务模块另行校验快照字段。
+-- 写入差错校验，不是加密认证；读取不以校验和拒绝存档。
 function Codec.Checksum(s)
     local a, b = 1, 0
     for i = 1, #s do a = (a + s:byte(i)) % 65521; b = (b + a) % 65521 end

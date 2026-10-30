@@ -1,4 +1,5 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 
 local EggCollectionListController = { Name = "EggCollectionListController", FeatureFlag = "EggCollection", Dependencies = { "PromptController" } }
 local function Integer(value)
@@ -30,14 +31,6 @@ local function CurrentPrice(data, now)
     return data.baseSellPrice
         + math.floor((data.baseSellPrice * deltaUnits * elapsed + 50 * duration) / (100 * duration)), false
 end
-function EggCollectionListController:ValidateConfig(context)
-    local c = GameConfig.EggCollectionList
-    if type(c) ~= "table" or c.TileViewId ~= 100218 or c.TemplateId ~= 100226 or c.ImageId ~= 100222
-        or c.ProgressId ~= 100223 or c.StatusTextId ~= 100225 or c.PriceTextId ~= 103143 or c.CollectAllButtonId ~= 100227
-        or c.CountTextId ~= 100406
-        or c.ProgressRefreshSeconds ~= 0.2 then return false, { "EggCollectionList 编辑器ID或进度刷新配置不符合约定" } end
-    return true
-end
 
 function EggCollectionListController:Start(context)
     if context.Side ~= "Client" then return end
@@ -48,12 +41,7 @@ function EggCollectionListController:Start(context)
     context.Services.EggCollectionListController = runtime
     local function Active() return runtime.Active and context.Services.EggCollectionListController == runtime end
     local function Protect(callback)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function Current(row)
         return Active() and runtime.Ready and runtime.Rows[row.data.eggId] == row

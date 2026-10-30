@@ -15,12 +15,6 @@ local function Percent(experience, requirement)
     end
     return units / 100
 end
-function RebirthController:ValidateConfig()
-    for _, field in ipairs({ "MultiplierTextId", "ProgressId", "ExperienceTextId", "ButtonId", "CountTextId" }) do
-        if not Integer(GameConfig.Rebirth[field]) then return false, { "重生UI配置无效: " .. field } end
-    end
-    return true
-end
 function RebirthController:Start(context)
     if context.Side ~= "Client" then return end
     local c, messages = GameConfig.Rebirth, context.NetMsg.Messages
@@ -40,7 +34,7 @@ function RebirthController:Start(context)
         context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
             if not Active() or rt.RenderVersion ~= token then return end
             local state = rt.State
-            local valid = state and Integer(state.sessionGeneration) and Decimal.IsValid(state.experience)
+            local valid = state and Decimal.IsValid(state.experience)
             if not valid then
                 Ui(c.CountTextId, function() UI:SetText({ c.CountTextId }, "", false) end)
                 Ui(c.MultiplierTextId, function() UI:SetText({ c.MultiplierTextId }, "", false) end)
@@ -66,7 +60,7 @@ function RebirthController:Start(context)
         if not Active() or type(data) ~= "table" or not Integer(data.version) or data.version <= rt.Version
             or type(data.busy) ~= "boolean" then return end
         if data.sessionGeneration ~= nil then
-            if not Integer(data.sessionGeneration) or data.sessionGeneration < rt.Session or not Integer(data.expectedCount, true)
+            if not Integer(data.expectedCount, true)
                 or data.expectedCount > c.MaxCount or not Integer(data.redeemedMask, true) or data.redeemedMask > 1048575
                 or not Decimal.IsValid(data.experience)
                 or data.multiplier ~= 1 + data.expectedCount * 0.5
@@ -75,17 +69,17 @@ function RebirthController:Start(context)
             rt.Session = data.sessionGeneration
         end
         local previous = rt.State
-        if not previous or previous.sessionGeneration ~= data.sessionGeneration then rt.ResultRequests = {} end
-        if not previous or previous.sessionGeneration ~= data.sessionGeneration or previous.expectedCount ~= data.expectedCount then rt.Pending = nil; rt.PendingOpen = nil end
+        if not previous then rt.ResultRequests = {} end
+        if not previous or previous.expectedCount ~= data.expectedCount then rt.Pending = nil; rt.PendingOpen = nil end
         rt.Version = data.version; rt.State = data
-        if not previous or previous.sessionGeneration ~= data.sessionGeneration or previous.expectedCount ~= data.expectedCount
+        if not previous or previous.expectedCount ~= data.expectedCount
             or previous.experience ~= data.experience or previous.requirement ~= data.requirement then Render() end
     end
     rt.ResultCallback = function(_, data)
         if not Active() or type(data) ~= "table" then return end
         local pending, state = rt.ResultRequests[data.requestId], rt.State
-        if not pending or not state or type(data.success) ~= "boolean" or data.requestId ~= pending.requestId or data.sessionGeneration ~= pending.sessionGeneration
-            or data.expectedCount ~= pending.expectedCount or state.sessionGeneration ~= pending.sessionGeneration then return end
+        if not pending or not state or type(data.success) ~= "boolean" or data.requestId ~= pending.requestId
+            or data.expectedCount ~= pending.expectedCount then return end
         rt.ResultRequests[data.requestId] = nil
         if rt.Pending == pending then rt.Pending = nil end
         if data.success then context.Services.PromptController:Show("普通重生成功，金币倍率提升")
@@ -104,7 +98,7 @@ function RebirthController:Start(context)
     rt.PaidClick = function()
         if not Active() or not rt.Ready or not rt.State then return end
         local state = rt.State
-        if not Integer(state.sessionGeneration) or state.expectedCount >= c.MaxCount
+        if state.expectedCount >= c.MaxCount
             or math.floor(state.redeemedMask / 2^state.expectedCount) % 2 == 1 then return end
         rt.RequestId = rt.RequestId + 1
         rt.PendingOpen = { requestId = rt.RequestId, sessionGeneration = state.sessionGeneration, expectedCount = state.expectedCount }
@@ -113,8 +107,8 @@ function RebirthController:Start(context)
     rt.Offer = function(_, data)
         if not Active() or type(data) ~= "table" then return end
         local pending, state = rt.PendingOpen, rt.State
-        if not pending or not state or data.requestId ~= pending.requestId or data.sessionGeneration ~= pending.sessionGeneration
-            or data.expectedCount ~= pending.expectedCount or state.sessionGeneration ~= pending.sessionGeneration
+        if not pending or not state or data.requestId ~= pending.requestId
+            or data.expectedCount ~= pending.expectedCount
             or state.expectedCount ~= pending.expectedCount or state.expectedCount >= c.MaxCount then return end
         local row = paid.Products[state.expectedCount + 1]
         if data.productIndex ~= state.expectedCount + 1 or data.goodsId ~= row.GoodsId
@@ -133,7 +127,7 @@ function RebirthController:Start(context)
         end
     end
     rt.PaidResult = function(_, data)
-        if not Active() or type(data) ~= "table" or data.success ~= true or data.sessionGeneration ~= rt.Session
+        if not Active() or type(data) ~= "table" or data.success ~= true
             or not Integer(data.receipt) or data.receipt <= (rt.LastReceipt or 0) or not Integer(data.productIndex)
             or data.productIndex > #paid.Products or not Integer(data.count) or data.count > c.MaxCount then return end
         rt.LastReceipt = data.receipt

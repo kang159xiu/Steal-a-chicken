@@ -13,12 +13,21 @@ function RefreshController:Start(context)
         local snapshot = runtime.Snapshot
         local visible = snapshot and (snapshot.phase == "Waiting" or snapshot.phase == "Countdown"
             or snapshot.phase == "Generating")
-        UI:OnShow({ config.CountdownUiId }, visible == true)
+        visible = visible == true
+        if runtime.LastVisible ~= visible then
+            UI:OnShow({ config.CountdownUiId }, visible)
+            runtime.LastVisible = visible
+        end
+        local text
         if snapshot and snapshot.phase == "Generating" then
-            UI:SetText({ config.CountdownUiId }, "刷新中", false)
+            text = "刷新中"
         elseif visible then
             local seconds = math.max(0, math.ceil((snapshot.deadlineMs - MiscService:GetServerTimestamp()) / 1000))
-            UI:SetText({ config.CountdownUiId }, tostring(seconds) .. "s", false)
+            text = tostring(seconds) .. "s"
+        end
+        if text and runtime.LastText ~= text then
+            UI:SetText({ config.CountdownUiId }, text, false)
+            runtime.LastText = text
         end
     end
 

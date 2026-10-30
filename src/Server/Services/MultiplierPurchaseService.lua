@@ -1,26 +1,10 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 local MultiplierProducts = require "Common.MultiplierProducts"
 local MultiplierPurchaseService = { Name = "MultiplierPurchaseService", FeatureFlag = "MultiplierPurchase",
     Dependencies = { "PurchaseService", "EconomyService", "PlayerSpeedService", "TreadmillService", "RebirthService" } }
 local kinds = { "Coin", "Training" }
 local function Integer(n) return type(n) == "number" and n > 0 and n < math.huge and n == math.floor(n) end
-function MultiplierPurchaseService:ValidateConfig()
-    local goods, items = {}, {}
-    for _, kind in ipairs(kinds) do
-        local c = GameConfig.MultiplierPurchase[kind]
-        for _, field in ipairs({ "ButtonId", "GroupId", "NextTextId", "CurrentTextId" }) do
-            if not Integer(c[field]) then return false, { "倍率购买UI配置无效" } end
-        end
-        if #c.Products ~= 3 then return false, { "倍率商品需要三档" } end
-        local targets = kind == "Coin" and { 2, 3, 4 } or { 5, 10, 20 }
-        for i, row in ipairs(c.Products) do
-            if row.Multiplier ~= targets[i] or not Integer(row.GoodsId) or type(row.ItemId) ~= "string" or row.ItemId == ""
-                or goods[row.GoodsId] or items[row.ItemId] then return false, { "倍率商品配置无效" } end
-            goods[row.GoodsId], items[row.ItemId] = true, true
-        end
-    end
-    return true
-end
 function MultiplierPurchaseService:Start(context)
     if context.Side ~= "Server" then return end
     local economy, speed, purchase = context.Services.EconomyService, context.Services.PlayerSpeedService, context.Services.PurchaseService
@@ -30,13 +14,8 @@ function MultiplierPurchaseService:Start(context)
     context.Services.MultiplierPurchaseService = rt
     local function Active() return rt.Active and context.Services.MultiplierPurchaseService == rt end
     local function CanPlay(id) return not GameConfig.Persistence.ProductionEnabled or (persistence and persistence:IsReady(id)) end
-    local function Protect(fn)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() fn((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+    local function Protect(callback)
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function Snapshot(id)
         if not CanPlay(id) then return nil end
@@ -51,7 +30,7 @@ function MultiplierPurchaseService:Start(context)
         if not rt.Ready then return false end
         local s = Snapshot(id) or {}
         local old = rt.Sent[id]
-        if not force and old and old.sessionGeneration == s.sessionGeneration and old.coinMultiplier == s.coinMultiplier
+        if not force and old and old.coinMultiplier == s.coinMultiplier
             and old.finalCoinMultiplier == s.finalCoinMultiplier
             and old.trainingPurchaseMultiplier == s.trainingPurchaseMultiplier and old.trainingMultiplier == s.trainingMultiplier then return false end
         rt.Sent[id] = s
@@ -80,9 +59,9 @@ function MultiplierPurchaseService:Start(context)
     Wake = function(id)
         if not rt.Ready or not Integer(id) then return end
         local s = Snapshot(id)
-        if not s or rt.Halted[id] == s.sessionGeneration then return end
+        if not s or rt.Halted[id] then return end
         local pending = rt.Pending[id]
-        if not pending or pending.generation ~= s.sessionGeneration then pending = { generation = s.sessionGeneration }; rt.Pending[id] = pending end
+        if not pending then pending = { generation = s.sessionGeneration }; rt.Pending[id] = pending end
         Schedule(id, pending, true)
     end
     local function Available(id, generation)
@@ -94,8 +73,8 @@ function MultiplierPurchaseService:Start(context)
     Scan = function(id, pending)
         if rt.Dead[id] or not CanPlay(id) then return end
         local s = Snapshot(id)
-        if not s or s.sessionGeneration ~= pending.generation then rt.Pending[id] = nil; return end
-        if rt.Halted[id] == pending.generation then rt.Pending[id] = nil; return end
+        if not s then rt.Pending[id] = nil; return end
+        if rt.Halted[id] then rt.Pending[id] = nil; return end
         for _, kind in ipairs(kinds) do
             local current = CurrentMultiplier(s, kind)
             local row = MultiplierProducts.Next(kind, current) -- 仅当前下一档；不扫描其他入口或提前购买档位。
@@ -122,7 +101,7 @@ function MultiplierPurchaseService:Start(context)
                         local valid, rejection = Available(id, pending.generation)
                         if not valid then return false, rejection end
                         local now = Snapshot(id)
-                        if not now or now.sessionGeneration ~= pending.generation or CurrentMultiplier(now, kind) ~= current then return false, "multiplier_changed" end
+                        if not now or CurrentMultiplier(now, kind) ~= current then return false, "multiplier_changed" end
                         if kind == "Coin" then commit, rejection = economy:PrepareCoinMultiplierCommit(id, pending.generation, row.Multiplier)
                         else commit, rejection = speed:PrepareTrainingMultiplierCommit(id, pending.generation, row.Multiplier) end
                         return commit ~= nil, rejection
@@ -159,14 +138,14 @@ function MultiplierPurchaseService:Start(context)
     end
     rt.Open = Protect(function(_, request, id)
         if not rt.Ready or not Integer(id) or type(request) ~= "table" or not config[request.kind]
-            or not Integer(request.requestId) or not Integer(request.sessionGeneration) or not Integer(request.expectedMultiplier) then return end
+            or not Integer(request.requestId) or not Integer(request.expectedMultiplier) then return end
         local function Reject(reason)
             Result(id, request.kind, request.sessionGeneration, false, reason, nil, request.requestId, request.expectedMultiplier)
         end
         local s = Snapshot(id)
-        if not s or s.sessionGeneration ~= request.sessionGeneration then Reject("session_unavailable"); return end
+        if not s then Reject("session_unavailable"); return end
         local previous = rt.Opens[id]
-        if not previous or previous.generation ~= s.sessionGeneration then previous = { generation = s.sessionGeneration, id = 0 }; rt.Opens[id] = previous end
+        if not previous then previous = { generation = s.sessionGeneration, id = 0 }; rt.Opens[id] = previous end
         if request.requestId <= previous.id then Reject("stale_request"); return end
         previous.id = request.requestId
         local current = CurrentMultiplier(s, request.kind)
@@ -183,7 +162,7 @@ function MultiplierPurchaseService:Start(context)
         if custom ~= true then return end
         for _, kind in ipairs(kinds) do for _, row in ipairs(config[kind].Products) do if row.ItemId == itemId then Wake(id); return end end end
     end)
-    rt.Leave = Protect(function(id) rt.Pending[id] = nil; rt.Opens[id] = nil; rt.Dead[id] = nil; rt.Revives[id] = nil; rt.Sent[id] = nil end)
+    rt.Leave = Protect(function(id) rt.Halted[id] = nil; rt.LastCommit[id] = nil; rt.Pending[id] = nil; rt.Opens[id] = nil; rt.Dead[id] = nil; rt.Revives[id] = nil; rt.Sent[id] = nil end)
     rt.Death = Protect(function(id) rt.Dead[id] = true; rt.Revives[id] = nil end)
     rt.Revive = Protect(function(id)
         rt.Dead[id] = nil
@@ -212,7 +191,7 @@ function MultiplierPurchaseService:Start(context)
     end))
     context.Events:Subscribe(self.Name, "PersistenceStateChanged", Protect(function(data)
         local last = rt.LastCommit[data.playerId]
-        if last and data.generation == last.archiveGeneration and data.state:find("save_failed", 1, true) then
+        if last and data.state:find("save_failed", 1, true) then
             Log:PrintError("[MultiplierPurchase] 提交后存档失败，不重新扣物", data.playerId, last.generation, last.kind, last.target, last.operation, data.reason)
         end
     end))

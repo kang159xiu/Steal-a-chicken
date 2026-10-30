@@ -1,6 +1,6 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 local Decimal = require "Common.DecimalInteger"
-local SpeedGrowth = require "Common.SpeedGrowth"
 local TreadmillController = { Name = "TreadmillController", FeatureFlag = "Treadmill", Dependencies = { "PromptController" } }
 local function Integer(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
@@ -18,20 +18,11 @@ local function Percent(experience, requirement)
     return units / 100
 end
 local function HasExperience(state)
-    return state ~= nil and Integer(state.sessionGeneration) and (state.homeId == nil or Integer(state.homeId))
+    return state ~= nil and (state.homeId == nil or Integer(state.homeId))
         and Integer(state.speedLevel)
         and Decimal.IsValid(state.experience) and Decimal.IsValid(state.speedUpgradeExperience)
-end
-function TreadmillController:ValidateConfig()
-    local c = GameConfig.Treadmill
-    for _, field in ipairs({ "ExperienceTextId", "FeedbackTextId", "ExperiencePreviewTextId", "SpeedProgressId", "SpeedProgressTextId" }) do
-        if not Integer(c[field]) then return false, { "跑步机显示ID无效: " .. field } end
-    end
-    if c.FeedbackIntervalSeconds ~= 0.3 or c.FeedbackAnimationSeconds ~= 0.5 or c.FeedbackAnimationIndex ~= 1
-        or c.FeedbackMinX ~= -700 or c.FeedbackMaxX ~= 400 or c.FeedbackMinY ~= -450 or c.FeedbackMaxY ~= 350 then
-        return false, { "跑步机反馈时序/坐标配置不符合规则" }
-    end
-    return true
+        and Decimal.IsValid(state.speedUpgradeRequirement) and state.speedUpgradeRequirement ~= "0"
+        and Decimal.Compare(state.speedUpgradeExperience, state.speedUpgradeRequirement) < 0
 end
 function TreadmillController:Start(context)
     if context.Side ~= "Client" then return end
@@ -41,12 +32,7 @@ function TreadmillController:Start(context)
     context.Services.TreadmillController = rt
     local function Active() return rt.Active and context.Services.TreadmillController == rt end
     local function Protect(callback)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function Ui(id, callback)
         if rt.UiFailed[id] then return false end
@@ -83,7 +69,7 @@ function TreadmillController:Start(context)
             end
             return
         end
-        if previous and previous.sessionGeneration == state.sessionGeneration and previous.homeId == state.homeId
+        if previous and previous.homeId == state.homeId
             and previous.targetVersion == state.targetVersion and previous.level == state.expectedLevel
             and previous.amount == state.experiencePerTick then return end
         local source = { sessionGeneration = state.sessionGeneration, homeId = state.homeId,
@@ -110,7 +96,7 @@ function TreadmillController:Start(context)
             return
         end
         Ui(c.ExperienceTextId, function() UI:SetText({ c.ExperienceTextId }, Decimal.Format(state.experience), false) end)
-        local requirement = SpeedGrowth.GetRequirement(state.speedLevel)
+        local requirement = state.speedUpgradeRequirement
         Ui(c.SpeedProgressId, function()
             if not rt.SpeedProgressReady then UI:SetProgressMaxValue({ c.SpeedProgressId }, 100); rt.SpeedProgressReady = true end
             UI:SetProgressCurrentValue({ c.SpeedProgressId }, Percent(state.speedUpgradeExperience, requirement))
@@ -125,15 +111,6 @@ function TreadmillController:Start(context)
         Ui(c.UiGroupId, function() UI:SetVisibility({ c.UiGroupId }, visible) end)
         rt.Visible = visible
     end
-    local function InBox(state)
-        local ok, result = pcall(function()
-            return TriggerBox:IsCharacterInTriggerBox(Character:GetLocalPlayerId(), state.triggerId)
-        end)
-        if not ok and not rt.TriggerFailed then
-            rt.TriggerFailed = true; Log:PrintError("[TreadmillController] 训练区域读取失败，关闭交互", tostring(result))
-        end
-        return ok and result == true
-    end
     local function Block()
         local state = rt.State
         if state then rt.BlockedTarget = math.max(rt.BlockedTarget, state.targetVersion) end
@@ -144,7 +121,6 @@ function TreadmillController:Start(context)
     local function Valid()
         local state = rt.State
         if not rt.Ready or not state or not state.training or state.targetVersion <= rt.BlockedTarget then return false end
-        if not InBox(state) then Block(); return false end
         return true
     end
     local function Render()
@@ -156,7 +132,7 @@ function TreadmillController:Start(context)
         context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, Protect(function()
             local current = rt.State
             if rt.RenderVersion ~= token or not current or current.homeId ~= state.homeId
-                or current.sessionGeneration ~= state.sessionGeneration or current.targetVersion ~= state.targetVersion
+                or current.targetVersion ~= state.targetVersion
                 or current.expectedLevel ~= state.expectedLevel or not Valid() then return end
             local maximum = state.expectedLevel >= c.MaxLevel
             local text = "lv." .. state.expectedLevel
@@ -179,27 +155,26 @@ function TreadmillController:Start(context)
             or not Integer(data.expectedLevel) or data.expectedLevel > c.MaxLevel
             or (data.expectedLevel < c.MaxLevel and not Decimal.IsValid(data.upgradeCost)) then return end
         if data.sessionGeneration ~= nil then
-            if not Integer(data.sessionGeneration) or data.sessionGeneration < rt.Session then return end
             rt.Session = data.sessionGeneration
         end
-        if data.training and (not Integer(data.homeId) or not Integer(data.sessionGeneration) or not Integer(data.triggerId)
-            or not Integer(data.speedLevel)
-            or not Decimal.IsValid(data.experience) or not Decimal.IsValid(data.speedUpgradeExperience) or type(data.walkSpeed) ~= "number"
+        if data.training and (not Integer(data.homeId) or not Integer(data.triggerId)
+            or not HasExperience(data) or type(data.walkSpeed) ~= "number"
             or not Decimal.IsValid(data.experiencePerTick)
             or (data.expectedLevel < c.MaxLevel and not Decimal.IsValid(data.nextExperiencePerTick))) then return end
         local previous = rt.State
-        if not previous or previous.homeId ~= data.homeId or previous.sessionGeneration ~= data.sessionGeneration then rt.ResultRequests = {} end
-        if not previous or previous.homeId ~= data.homeId or previous.sessionGeneration ~= data.sessionGeneration
+        if not previous or previous.homeId ~= data.homeId then rt.ResultRequests = {} end
+        if not previous or previous.homeId ~= data.homeId
             or previous.targetVersion ~= data.targetVersion or not data.training then
             rt.Pending = {}; ClearCopies()
         end
         rt.Version = data.version; rt.State = data
         -- 经验面板显隐完全由编辑器管理；非训练状态也更新有效会话的数值。
-        if not previous or previous.homeId ~= data.homeId or previous.sessionGeneration ~= data.sessionGeneration
+        if not previous or previous.homeId ~= data.homeId
             or previous.speedLevel ~= data.speedLevel or previous.experience ~= data.experience
-            or previous.speedUpgradeExperience ~= data.speedUpgradeExperience then QueueExperience() end
+            or previous.speedUpgradeExperience ~= data.speedUpgradeExperience
+            or previous.speedUpgradeRequirement ~= data.speedUpgradeRequirement then QueueExperience() end
         SyncFeedbackSource()
-        if not previous or previous.homeId ~= data.homeId or previous.sessionGeneration ~= data.sessionGeneration
+        if not previous or previous.homeId ~= data.homeId
             or previous.targetVersion ~= data.targetVersion or previous.triggerId ~= data.triggerId
             or previous.expectedLevel ~= data.expectedLevel or previous.upgradeCost ~= data.upgradeCost
             or previous.training ~= data.training or previous.experiencePerTick ~= data.experiencePerTick
@@ -208,9 +183,9 @@ function TreadmillController:Start(context)
     rt.ResultCallback = Protect(function(_, data)
         if type(data) ~= "table" then return end
         local request, state = rt.ResultRequests[data.requestId], rt.State
-        if not request or not state or data.sessionGeneration ~= request.sessionGeneration or data.homeId ~= request.homeId
+        if not request or not state or data.homeId ~= request.homeId
             or data.targetVersion ~= request.targetVersion or data.expectedLevel ~= request.expectedLevel
-            or state.sessionGeneration ~= request.sessionGeneration or state.homeId ~= request.homeId
+            or state.homeId ~= request.homeId
             or type(data.success) ~= "boolean" or (not data.success and state.targetVersion ~= request.targetVersion) then return end
         rt.ResultRequests[data.requestId] = nil
         rt.Pending[data.requestId] = nil
@@ -240,7 +215,7 @@ function TreadmillController:Start(context)
             if not Active() then Destroy(uid); return end
             context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
                 if not Active() or not rt.Copies[uid] then Destroy(uid); return end
-                if not Valid() or rt.State.sessionGeneration ~= state.sessionGeneration
+                if not Valid()
                     or rt.State.targetVersion ~= state.targetVersion or rt.FeedbackSource ~= source then Destroy(uid); return end
                 local ok, err = pcall(function() UI:PlayUIAnimation(uid, c.FeedbackAnimationIndex, 0) end)
                 if not ok then
@@ -275,7 +250,6 @@ function TreadmillController:Start(context)
     context.Timers:AddLoopFrame(self.Name, 1, Protect(function()
         rt.Frame = rt.Frame + 1
         if not rt.Ready then return end
-        if rt.Ready and rt.State and rt.State.training then Valid() end
         local source = rt.FeedbackSource
         if source and source.dueFrame and rt.Frame >= source.dueFrame then source.landed = true; source.dueFrame = nil end
         if rt.ExperienceDueFrame and rt.Frame >= rt.ExperienceDueFrame then rt.ExperienceDueFrame = nil; RenderExperience() end

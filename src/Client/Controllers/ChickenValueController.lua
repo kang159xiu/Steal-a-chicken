@@ -2,14 +2,18 @@ local GameConfig = require "Common.Config.GameConfig"
 local Decimal = require "Common.DecimalInteger"
 local EggModelText = require "Common.EggModelText"
 local ChickenValueController = { Name = "ChickenValueController" }
-local function EggConfig(eggTypeId)
-    for _, chicken in pairs(GameConfig.ChickenTypes) do
-        if chicken.Egg and chicken.Egg.EggTypeId == eggTypeId then return chicken.Egg end
-    end
-end
-
 function ChickenValueController:Start(context)
     if context.Side ~= "Client" then return end
+    local eggConfigsByType = {}
+    for _, chicken in pairs(GameConfig.ChickenTypes) do
+        local egg = chicken.Egg
+        if egg and egg.EggTypeId ~= nil and not eggConfigsByType[egg.EggTypeId] then
+            eggConfigsByType[egg.EggTypeId] = egg
+        end
+    end
+    local function EggConfig(eggTypeId)
+        return eggConfigsByType[eggTypeId]
+    end
     local config = GameConfig.ChickenDisplay
     local rt = { Ready = false, Active = true, Sources = {}, Roots = {}, TransferredRoots = {} }
     context.Services.ChickenValueController = rt
@@ -26,7 +30,11 @@ function ChickenValueController:Start(context)
                 local seconds = math.max(0, math.ceil((record.countdownEndMs - MiscService:GetServerTimestamp()) / 1000))
                 FuncElement:SetTextBoardText(elementId, tostring(seconds) .. "s")
             end
-            if Current(record) then Element:SetVisibility(elementId, visible) end
+            local cached = record.countdownElements[elementId]
+            if Current(record) and cached.visible ~= visible then
+                Element:SetVisibility(elementId, visible)
+                cached.visible = visible
+            end
         end)
         if not ok then
             Log:PrintError("[ChickenValue] 倒计时文字失败，仅跳过本元件", "rootId:", record.rootId,
@@ -66,7 +74,7 @@ function ChickenValueController:Start(context)
                         FuncElement:SetTextBoardText(elementId, chicken.DisplayName)
                         if Current(record) then Element:SetVisibility(elementId, true) end
                     elseif purpose == config.CountdownPurpose then
-                        record.countdownElements[elementId] = true
+                        record.countdownElements[elementId] = record.countdownElements[elementId] or {}
                         RenderCountdown(record, elementId)
                     end
                 end) end

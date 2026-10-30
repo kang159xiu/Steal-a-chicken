@@ -11,12 +11,7 @@ local FORCE_CUSTOM_IMAGE = true
 local START_DELAY_SECONDS = 3
 local POST_SET_LOG_DELAY_FRAMES = 2
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
 function AvatarPictureBoardTest:Start(context)
     if context.Side ~= "Client" then

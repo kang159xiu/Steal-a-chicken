@@ -1,26 +1,9 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 local Decimal = require "Common.DecimalInteger"
 local SellShopService = { Name = "SellShopService", FeatureFlag = "SellShop", Dependencies = { "InventoryService", "EconomyService" } }
 local function Integer(value)
     return type(value) == "number" and value >= 0 and value < math.huge and value == math.floor(value)
-end
-function SellShopService:ValidateConfig()
-    local c = GameConfig.SellShop
-    local errors = {}
-    if type(c) == "table" and c.TestMoneyEnabled == true then
-        if not Integer(c.TestMoneyButtonId) or c.TestMoneyButtonId == 0
-            or not Decimal.IsValid(c.TestMoneyAmount) or c.TestMoneyAmount == "0" then
-            errors[#errors + 1] = "测试加钱按钮或金额配置无效"
-        end
-    end
-    for _, key in ipairs({ "EggListId", "ChickenListId", "TemplateId", "ImageId", "PriceTextId",
-        "AppearanceButtonId", "SelectedBorderId", "SellAllEggsButtonId", "SellAllChickensButtonId", "BalanceTextId" }) do
-        if not c or not Integer(c[key]) or c[key] == 0 then errors[#errors + 1] = "SellShop." .. key .. " 必须是正整数" end
-    end
-    for typeId, config in pairs(GameConfig.ChickenTypes) do
-        if config.Enabled and not Decimal.FromSafeInteger(config.ChickenSellPrice) then errors[#errors + 1] = typeId .. " 鸡售价无效" end
-    end
-    return #errors == 0, errors
 end
 function SellShopService:Start(context)
     if context.Side ~= "Server" then return end
@@ -30,18 +13,13 @@ function SellShopService:Start(context)
     context.Services.SellShopService = runtime
     local function Active() return runtime.Active and context.Services.SellShopService == runtime end
     local function Protect(callback)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function State(playerId)
         local generation = economy:GetSessionGeneration(playerId)
         if not generation then return nil end
         local state = runtime.States[playerId]
-        if not state or state.generation ~= generation then
+        if not state then
             state = { generation = generation, version = 0, lastRequestId = 0, busy = false }
             runtime.States[playerId] = state
         end
@@ -76,7 +54,7 @@ function SellShopService:Start(context)
     end)
     runtime.ActionCallback = Protect(function(_, message, playerId)
         if not Integer(playerId) or playerId == 0 or type(message) ~= "table"
-            or not Integer(message.sessionGeneration) or not Integer(message.requestId) or message.requestId == 0
+            or not Integer(message.requestId) or message.requestId == 0
             or (message.action ~= "single" and message.action ~= "all_chickens" and message.action ~= "all_eggs" and message.action ~= "test_add_money")
             or (message.action == "single" and (type(message.itemId) ~= "string" or message.itemId == "")) then return end
         local state = State(playerId)
@@ -88,7 +66,6 @@ function SellShopService:Start(context)
                 success = success, reason = reason, results = results or {}, total = total or "0",
                 balance = economy:GetBalance(playerId) })
         end
-        if message.sessionGeneration ~= state.generation then Result(false, "stale_session"); return end
         if message.requestId <= state.lastRequestId then Result(false, "stale_request"); return end
         state.lastRequestId = message.requestId
         if state.busy then Result(false, "sale_busy"); return end
@@ -123,8 +100,8 @@ function SellShopService:Start(context)
             if not finishInventory then state.busy = false; Result(false, reason); return end
             finishEconomy, reason = economy:BeginSaleBatch(playerId, state.generation)
             if not finishEconomy then pcall(finishInventory); state.busy = false; Result(false, reason); return end
-            state.batchSync = true
         end
+        state.batchSync = true
         local results, total, success = {}, "0", true
         local ok, err = pcall(function()
             for _, candidate in ipairs(batch) do
@@ -190,6 +167,7 @@ function SellShopService:Start(context)
         runtime.States[playerId] = nil
     end
     System:RegisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback)
+    System:RegisterEvent(Events.ON_PLAYER_RECONNECTED, runtime.LeaveCallback)
     System:BindNotify(messages.SellShopSnapshotRequest, runtime.SnapshotCallback)
     System:BindNotify(messages.SellShopAction, runtime.ActionCallback)
 end
@@ -201,6 +179,7 @@ function SellShopService:Stop(context)
     System:UnbindNotify(context.NetMsg.Messages.SellShopSnapshotRequest, runtime.SnapshotCallback)
     System:UnbindNotify(context.NetMsg.Messages.SellShopAction, runtime.ActionCallback)
     System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback)
+    System:UnregisterEvent(Events.ON_PLAYER_RECONNECTED, runtime.LeaveCallback)
     context.Events:UnsubscribeOwner(self.Name)
     context.Services.SellShopService = nil
 end

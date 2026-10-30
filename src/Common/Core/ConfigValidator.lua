@@ -4,9 +4,7 @@ local function AddError(errors, message)
     errors[#errors + 1] = message
 end
 
-local function IsPositiveInteger(value)
-    return type(value) == "number" and value > 0 and value == math.floor(value)
-end
+local IsPositiveInteger = require("Common.Validation").IsPositiveInteger
 
 ---校验功能开关名称和值；不补任何默认值。
 function ConfigValidator.ValidateFeatureFlags(featureFlags)

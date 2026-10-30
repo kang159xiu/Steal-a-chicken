@@ -1,12 +1,7 @@
 local TimerRegistry = {}
 TimerRegistry.__index = TimerRegistry
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
 function TimerRegistry.New(onOwnerError)
     return setmetatable({

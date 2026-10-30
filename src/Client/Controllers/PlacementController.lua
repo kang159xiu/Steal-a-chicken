@@ -1,4 +1,5 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 
 local PlacementController = {
     Name = "PlacementController",
@@ -63,12 +64,7 @@ function PlacementController:Start(context)
     end
 
     local function Protect(callback)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, message = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(PlacementController.Name, tostring(message)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(PlacementController.Name, tostring(err)) end, callback)
     end
 
     runtime.StateCallback = Protect(function(_, message)
@@ -137,7 +133,7 @@ function PlacementController:Start(context)
         Render()
         System:SendToServer(context.NetMsg.Messages.PlacementSnapshotRequest, {})
     end)
-    context.Timers:AddLoopFrame(PlacementController.Name, 1, Protect(function()
+    context.Timers:AddLoopTimer(PlacementController.Name, 0.1, Protect(function()
         if runtime.Ready then Render() end
     end))
 end

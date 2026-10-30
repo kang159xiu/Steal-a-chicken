@@ -1,27 +1,10 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 local Decimal = require "Common.DecimalInteger"
 local TreadmillService = { Name = "TreadmillService", FeatureFlag = "Treadmill",
     Dependencies = { "HomeService", "EconomyService", "PlayerSpeedService" } }
 local function Integer(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
-end
-function TreadmillService:ValidateConfig()
-    local c, rows = GameConfig.Treadmill, GameConfig.TreadmillLevels
-    if c.DefaultLevel ~= 1 or c.MaxLevel ~= 20 or c.ExperienceTickSeconds ~= 0.2 or #rows ~= 20 then
-        return false, { "Treadmill需要20级及0.2秒经验周期" }
-    end
-    for _, field in ipairs({ "UiGroupId", "LevelTextId", "PriceTextId", "UpgradeButtonId", "FeedbackGroupId" }) do
-        if not Integer(c[field]) then return false, { "跑步机UI ID无效: " .. field } end
-    end
-    local seen = {}
-    for level, row in ipairs(rows) do
-        if row.Level ~= level or not Decimal.IsValid(row.ExperiencePerTick)
-            or row.ExperiencePerTick:byte(-1) % 2 ~= 0 or not Integer(row.TemplateRootId)
-            or seen[row.TemplateRootId] or (level < 20 and not Decimal.IsValid(row.UpgradeCost))
-            or (level == 20 and row.UpgradeCost ~= nil) then return false, { "跑步机等级配置无效: " .. level } end
-        seen[row.TemplateRootId] = true
-    end
-    return true
 end
 function TreadmillService:Start(context)
     if context.Side ~= "Server" then return end
@@ -39,12 +22,7 @@ function TreadmillService:Start(context)
     end
     local function Active() return rt.Active and context.Services.TreadmillService == rt end
     local function Protect(callback)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function NextTarget() rt.TargetVersion = rt.TargetVersion + 1; return rt.TargetVersion end
     local function Online(id)
@@ -56,7 +34,7 @@ function TreadmillService:Start(context)
             and economy:IsCurrent(id, state.generation) and home:IsOwner(id, state.homeId)
     end
     local function Inside(id, state)
-        if not CanPlay(id) or not Current(id, state) or rt.Dead[id] or state.disabled or not state.rootId then return false end
+        if not CanPlay(id) or not Current(id, state) or rt.Dead[id] or state.disabled then return false end
         local ok, result = pcall(function() return TriggerBox:IsCharacterInTriggerBox(id, state.triggerId) end)
         if not ok and not state.triggerError then
             state.triggerError = true; Log:PrintError("[Treadmill] 触发盒读取失败", "homeId:", state.homeId, tostring(result))
@@ -73,7 +51,7 @@ function TreadmillService:Start(context)
         if not Active() or not rt.Ready then return end
         local state = rt.Players[id]
         local snapshot = speed:GetSnapshot(id)
-        if state and (rt.Players[id] ~= state or not snapshot or snapshot.sessionGeneration ~= state.generation) then return end
+        if state and (rt.Players[id] ~= state or not snapshot) then return end
         rt.Version = rt.Version + 1
         local level = state and state.level or 1
         local amount = snapshot and speed:GetExperiencePerTick(id, snapshot.sessionGeneration, rows[level].ExperiencePerTick)
@@ -85,6 +63,7 @@ function TreadmillService:Start(context)
             expectedLevel = level, upgradeCost = rows[level].UpgradeCost, experiencePerTick = amount, nextExperiencePerTick = nextAmount,
             speedLevel = snapshot and snapshot.speedLevel, experience = snapshot and snapshot.experience,
             speedUpgradeExperience = snapshot and snapshot.speedUpgradeExperience,
+            speedUpgradeRequirement = snapshot and snapshot.speedUpgradeRequirement,
             walkSpeed = snapshot and snapshot.walkSpeed, rebirthCount = snapshot and snapshot.rebirthCount,
             multiplier = snapshot and snapshot.multiplier,
         })
@@ -110,6 +89,38 @@ function TreadmillService:Start(context)
         rt.Players[id] = nil
         if state then CancelOperation(state); Destroy(state.rootId); NextTarget() end
     end
+    local function CopyDiagnosticId(id, state, level)
+        return "Treadmill:" .. state.homeId .. ":" .. level .. ":player=" .. tostring(id)
+            .. ":session=" .. tostring(state.generation) .. ":target=" .. tostring(state.targetVersion)
+    end
+    local function RestoreDiagnostic(stage, id, state, level, reason)
+        pcall(function()
+            local fields = {}
+            local function Read(name, getter)
+                local ok, value = pcall(getter)
+                local converted, text = pcall(tostring, value)
+                fields[#fields + 1] = name .. "=" .. (ok and converted and text or "unavailable")
+            end
+            Read("playerId", function() return id end)
+            Read("session", function() return state.generation end)
+            Read("homeId", function() return state.homeId end)
+            Read("level", function() return level end)
+            Read("templateId", function() return rows[level].TemplateRootId end)
+            Read("copyContext", function() return CopyDiagnosticId(id, state, level) end)
+            Read("timestampMs", function() return MiscService:GetServerTimestamp() end)
+            Read("reason", function() return reason end)
+            if stage ~= "restore_complete" then
+                for _, key in ipairs({ "Ready", "Generating", "Refreshing", "Generation", "Stopped" }) do
+                    Read("theft." .. key, function()
+                        local theft = context.Services.TheftService
+                        if not theft then return "module_missing" end
+                        return theft[key]
+                    end)
+                end
+            end
+            pcall(function() Log:PrintServerLog("[TreadmillRestoreDiag]", stage, table.concat(fields, " | ")) end)
+        end)
+    end
     local function CopyModel(id, state, level, upgrade, result, reset)
         local op = { level = level, upgrade = upgrade, targetVersion = state.targetVersion, reset = reset, result = result,
             playerId = id, generation = state.generation, state = state }
@@ -118,12 +129,12 @@ function TreadmillService:Start(context)
             return Current(id, state) and not rt.Dead[id] and state.operation == op and not op.invalid
                 and (not upgrade or (state.training and state.targetVersion == op.targetVersion and Inside(id, state)))
         end
-        local function FinishFailure(reason, disable)
+        local function FinishFailure(reason, disable, copyFailed)
             if state.operation ~= op then return end
             state.operation = nil
-            if disable then state.disabled = true; state.training = false; state.targetVersion = NextTarget() end
+            if disable and not copyFailed then state.disabled = true; state.training = false; state.targetVersion = NextTarget() end
             Log:PrintError("[Treadmill] 模型操作失败，未扣款/未升级", "homeId:", state.homeId, "level:", level, "reason:", tostring(reason))
-            if result and (reset or Current(id, state)) then result(false, reason) end
+            if result and (reset or Current(id, state)) then result(false, reason, copyFailed) end
             Send(id)
         end
         local position, rotation
@@ -133,10 +144,10 @@ function TreadmillService:Start(context)
         end)
         if not readOk then FinishFailure(tostring(readError), not reset); return op end
         local ok, err = pcall(function()
-            context.ElementCopy:CopyTree(rows[level].TemplateRootId, position, "Treadmill:" .. state.homeId .. ":" .. level, function(copy)
+            context.ElementCopy:CopyTree(rows[level].TemplateRootId, position, CopyDiagnosticId(id, state, level), function(copy)
                 -- 此回调不能使用Active包装：Stop后到达的完整复制也必须清理。
                 if type(copy) ~= "table" or copy.success ~= true or not Integer(copy.rootId) then
-                    if Active() then FinishFailure(type(copy) == "table" and copy.reason or "copy_failed", not upgrade and not reset) end
+                    if Active() then FinishFailure(type(copy) == "table" and copy.reason or "copy_failed", not upgrade and not reset, true) end
                     return -- 部分失败副本按ElementCopy契约保留，不重试。
                 end
                 local root = copy.rootId
@@ -206,7 +217,7 @@ function TreadmillService:Start(context)
         if not CanPlay(id) or not Active() or not rt.Ready or rt.Departed[id] or not home.TreadmillResourcesReady then return nil end
         local homeId, generation = home:GetPlayerHome(id), economy:GetSessionGeneration(id)
         local state = rt.Players[id]
-        if state and (state.homeId ~= homeId or state.generation ~= generation) then Drop(id); state = nil end
+        if state and state.homeId ~= homeId then Drop(id); state = nil end
         if not homeId or not generation or not economy:IsCurrent(id, generation) or not home:IsOwner(id, homeId)
             or not Online(id) then return nil end
         if state then return state end
@@ -224,14 +235,14 @@ function TreadmillService:Start(context)
     function rt:CanPurchaseMultiplier(id, generation)
         local state = rt.Players[id]
         if not CanPlay(id) or not economy:IsCurrent(id, generation) or rt.Dead[id] then return false, "session_unavailable" end
-        if not state or state.generation ~= generation or not Current(id, state) then return false, "treadmill_unavailable" end
+        if not state or not Current(id, state) then return false, "treadmill_unavailable" end
         if state.operation then return false, "treadmill_busy" end
         return true
     end
     function rt:PrepareReset(id, generation, callback)
         local state = Ensure(id)
-        if not state or state.generation ~= generation or not Current(id, state) or rt.Dead[id]
-            or state.disabled or not state.rootId then return false, "treadmill_unavailable" end
+        if not state or not Current(id, state) or rt.Dead[id]
+            or state.disabled then return false, "treadmill_unavailable" end
         if state.operation then return false, "treadmill_busy" end
         local op = CopyModel(id, state, 1, false, callback, true)
         if state.operation == op then Send(id) end
@@ -244,7 +255,7 @@ function TreadmillService:Start(context)
     function rt:PrepareResetCommit(id, generation, token, commitGrowth)
         local state = rt.Players[id]
         if not token or not state or state.operation ~= token or not token.reset or not token.prepared or token.invalid
-            or token.playerId ~= id or token.generation ~= generation or not Current(id, state) or rt.Dead[id] then
+            or token.playerId ~= id or not Current(id, state) or rt.Dead[id] then
             return nil, "reset_expired"
         end
         return function()
@@ -279,7 +290,8 @@ function TreadmillService:Start(context)
     rt.EnterBox = Protect(function(id, triggerId)
         if not rt.Ready then return end
         local state = Ensure(id)
-        if not state or state.triggerId ~= triggerId or not Inside(id, state) then return end
+        if not state or state.triggerId ~= triggerId or not CanPlay(id)
+            or not Current(id, state) or rt.Dead[id] or state.disabled then return end
         if not state.training then state.training = true; state.targetVersion = NextTarget() end
         Send(id)
     end)
@@ -289,7 +301,7 @@ function TreadmillService:Start(context)
     end)
     rt.Action = Protect(function(_, message, id)
         if not rt.Ready or type(message) ~= "table" or not Integer(id) then return end
-        for _, field in ipairs({ "requestId", "sessionGeneration", "homeId", "targetVersion", "expectedLevel" }) do
+        for _, field in ipairs({ "requestId", "homeId", "targetVersion", "expectedLevel" }) do
             if not Integer(message[field]) then return end
         end
         local function Result(success, reason)
@@ -299,7 +311,7 @@ function TreadmillService:Start(context)
         end
         local state = Ensure(id)
         if not state or not state.training or not Inside(id, state) or state.homeId ~= message.homeId
-            or state.generation ~= message.sessionGeneration or state.targetVersion ~= message.targetVersion then
+            or state.targetVersion ~= message.targetVersion then
             Result(false, "interaction_expired"); return
         end
         if state.operation then Result(false, "upgrade_busy"); return end
@@ -358,18 +370,13 @@ function TreadmillService:Start(context)
             if not Current(id, state) then Drop(id)
             elseif not CanPlay(id) then state.training = false
             elseif state.training then
-                if Inside(id, state) then
+                if not rt.Dead[id] and not state.disabled then
                     local amount, reason = speed:GetExperiencePerTick(id, state.generation, rows[state.level].ExperiencePerTick)
                     if not amount then error("跑步机倍率经验配置无效: " .. tostring(reason)) end
                     speed:AddExperience(id, state.generation, amount)
                 else StopTraining(id, state) end
             end
         end
-    end))
-    -- 每帧只复核已训练者，离开触发盒事件缺失时也立即失效交互/复制操作。
-    context.Timers:AddLoopFrame(self.Name, 1, Protect(function()
-        if not rt.Ready then return end
-        for id, state in pairs(rt.Players) do if state.training and not Inside(id, state) then StopTraining(id, state) end end
     end))
     if GameConfig.Persistence.ProductionEnabled then
         assert(persistence:RegisterAdapter("treadmill", {
@@ -379,8 +386,11 @@ function TreadmillService:Start(context)
                 return { version = 1, level = state.level }
             end,
             Restore = function(id, data, done)
-                local level = data == nil and 1 or data.level
-                if data and (data.version ~= 1 or not Integer(level) or level > c.MaxLevel) then done(false, "invalid_treadmill_snapshot"); return end
+                local level = 1
+                if data ~= nil then
+                    if data.version ~= 1 then Log:PrintServerLog("[Persistence] version mismatch", id, "treadmill", tostring(data.version), 1) end
+                    if data.level ~= nil then level = data.level end
+                end
                 local homeId, generation = home:GetPlayerHome(id), economy:GetSessionGeneration(id)
                 local resources = homeId and home:GetTreadmillResources(homeId)
                 if not resources or not resources.triggerId or not resources.positionId or not generation then done(false, "treadmill_resources_missing"); return end
@@ -388,12 +398,27 @@ function TreadmillService:Start(context)
                 local state = { homeId = homeId, generation = generation, level = level, triggerId = resources.triggerId,
                     positionId = resources.positionId, targetVersion = NextTarget(), training = false, lastRequestId = 0 }
                 rt.Players[id], rt.Departed[id] = state, nil
-                CopyModel(id, state, level, false, function(ok, token)
-                    if not ok then done(false, token); return end
-                    if not Current(id, state) or state.operation ~= token then Destroy(token.rootId); done(false, "restore_expired"); return end
+                RestoreDiagnostic("restore_begin", id, state, level)
+                CopyModel(id, state, level, false, function(ok, token, copyFailed)
+                    if not ok then
+                        RestoreDiagnostic("restore_failed", id, state, level, token)
+                        if copyFailed then
+                            if not Current(id, state) or state.operation ~= nil then done(false, "restore_expired"); return end
+                            -- Keep the saved level and gameplay available when the copy callback fails.
+                            RestoreDiagnostic("restore_skipped", id, state, level, token)
+                            done(true, function() Send(id); return true end)
+                            return
+                        end
+                        done(false, token); return
+                    end
+                    if not Current(id, state) or state.operation ~= token then
+                        RestoreDiagnostic("restore_failed", id, state, level, "restore_expired")
+                        Destroy(token.rootId); done(false, "restore_expired"); return
+                    end
                     state.rootId, state.operation = token.rootId, nil
                     token.committed = true
                     home:UpdateTreadmillExperienceText(state.homeId, state.level)
+                    RestoreDiagnostic("restore_complete", id, state, level)
                     done(true, function() Send(id); return true end)
                 end, true)
             end,

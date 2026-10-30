@@ -1,20 +1,9 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 local RebirthService = { Name = "RebirthService", FeatureFlag = "Rebirth",
     Dependencies = { "PlayerSpeedService", "TreadmillService", "EconomyService", "HomeService", "PurchaseService" } }
 local function Integer(value, zero)
     return type(value) == "number" and value >= (zero and 0 or 1) and value < math.huge and value == math.floor(value)
-end
-function RebirthService:ValidateConfig()
-    local c = GameConfig.RebirthPurchase
-    if GameConfig.Rebirth.MaxCount ~= 20 or not c or not Integer(c.ButtonId) or type(c.Products) ~= "table"
-        or #c.Products ~= 20 then return false, { "重生商品需要完整20档" } end
-    local goods, items = {}, {}
-    for i, row in ipairs(c.Products) do
-        if row.Count ~= i - 1 or not Integer(row.GoodsId) or type(row.ItemId) ~= "string" or row.ItemId == ""
-            or goods[row.GoodsId] or items[row.ItemId] then return false, { "重生商品配置无效: " .. i } end
-        goods[row.GoodsId], items[row.ItemId] = true, true
-    end
-    return true
 end
 function RebirthService:Start(context)
     if context.Side ~= "Server" then return end
@@ -30,12 +19,7 @@ function RebirthService:Start(context)
     end
     local function Active() return rt.Active and context.Services.RebirthService == rt end
     local function Protect(callback)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function Send(id)
         if not Active() or not rt.Ready then return end
@@ -74,9 +58,9 @@ function RebirthService:Start(context)
         local s = speed:GetSnapshot(id)
         if not s or not economy:IsCurrent(id, s.sessionGeneration) then return end
         local generation = s.sessionGeneration
-        if rt.Faulted[id] == generation or rt.Halted[id] == generation then return end
+        if rt.Faulted[id] or rt.Halted[id] then return end
         local pending = rt.Pending[id]
-        if not pending or pending.generation ~= generation then pending = { generation = generation }; rt.Pending[id] = pending end
+        if not pending then pending = { generation = generation }; rt.Pending[id] = pending end
         Schedule(id, pending, true)
     end
     local function Eligible(id, lock)
@@ -120,7 +104,7 @@ function RebirthService:Start(context)
             Cancel(id); Result(id, request, false, why); Send(id)
             if why == "treadmill_busy" or why == "treadmill_unavailable" or why == "sale_batch_busy" then
                 local pending = rt.Pending[id]
-                if pending and pending.generation == generation then Schedule(id, pending) end
+                if pending then Schedule(id, pending) end
             else Wake(id) end
         end
         local function Finish(success, token)
@@ -192,10 +176,10 @@ function RebirthService:Start(context)
     Scan = function(id, pending)
         if not CanPlay(id) or rt.Dead[id] then return end -- 保留待兑现，读档/复活重新唤醒。
         local s = speed:GetSnapshot(id)
-        if not s or s.sessionGeneration ~= pending.generation or not economy:IsCurrent(id, pending.generation) then
+        if not s or not economy:IsCurrent(id, pending.generation) then
             rt.Pending[id] = nil; return
         end
-        if rt.Faulted[id] == pending.generation or rt.Halted[id] == pending.generation then rt.Pending[id] = nil; return end
+        if rt.Faulted[id] or rt.Halted[id] then rt.Pending[id] = nil; return end
         if s.rebirthCount >= GameConfig.Rebirth.MaxCount then rt.Pending[id] = nil; return end
         if rt.Locks[id] then Schedule(id, pending); return end
         for index, row in ipairs(products) do
@@ -220,16 +204,16 @@ function RebirthService:Start(context)
     end
     local function RequestValid(request, id)
         return rt.Ready and CanPlay(id) and Integer(id) and type(request) == "table" and Integer(request.requestId)
-            and Integer(request.sessionGeneration) and Integer(request.expectedCount, true) and request.expectedCount <= GameConfig.Rebirth.MaxCount
+             and Integer(request.expectedCount, true) and request.expectedCount <= GameConfig.Rebirth.MaxCount
     end
     rt.Action = Protect(function(_, request, id)
         if not RequestValid(request, id) then return end
         local s = speed:GetSnapshot(id)
-        if not s or s.sessionGeneration ~= request.sessionGeneration or not economy:IsCurrent(id, request.sessionGeneration) then
+        if not s or not economy:IsCurrent(id, request.sessionGeneration) then
             Result(id, request, false, "session_unavailable"); return
         end
         local previous = rt.Requests[id]
-        if previous and previous.generation == request.sessionGeneration and request.requestId <= previous.id then
+        if previous and request.requestId <= previous.id then
             Result(id, request, false, "stale_request"); return
         end
         rt.Requests[id] = { generation = request.sessionGeneration, id = request.requestId }
@@ -239,10 +223,10 @@ function RebirthService:Start(context)
     rt.Open = Protect(function(_, request, id)
         if not RequestValid(request, id) then return end
         local s = speed:GetSnapshot(id)
-        if not s or s.sessionGeneration ~= request.sessionGeneration or s.rebirthCount ~= request.expectedCount
+        if not s or s.rebirthCount ~= request.expectedCount
             or not economy:IsCurrent(id, request.sessionGeneration) or rt.Dead[id] then return end
         local previous = rt.Opens[id]
-        if previous and previous.generation == request.sessionGeneration and request.requestId <= previous.id then return end
+        if previous and request.requestId <= previous.id then return end
         rt.Opens[id] = { generation = request.sessionGeneration, id = request.requestId }
         local index = s.rebirthCount + 1
         local row = products[index]
@@ -258,7 +242,7 @@ function RebirthService:Start(context)
     end)
     rt.Leave = Protect(function(id)
         if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(id) end
-        Cancel(id); rt.Requests[id] = nil; rt.Opens[id] = nil; rt.Pending[id] = nil; rt.Dead[id] = nil; rt.Revives[id] = nil
+        Cancel(id); rt.Faulted[id] = nil; rt.Halted[id] = nil; rt.LastPaid[id] = nil; rt.Requests[id] = nil; rt.Opens[id] = nil; rt.Pending[id] = nil; rt.Dead[id] = nil; rt.Revives[id] = nil
     end)
     rt.Death = Protect(function(id) rt.Dead[id] = true; rt.Revives[id] = nil; Cancel(id); if rt.Ready then Send(id) end end)
     rt.Revive = Protect(function(id)
@@ -269,7 +253,7 @@ function RebirthService:Start(context)
         context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, Protect(function()
             if rt.Revives[id] ~= token or rt.Dead[id] or not economy:IsCurrent(id, generation) then return end
             rt.Revives[id] = nil
-            if rt.Halted[id] == generation then rt.Halted[id] = nil end
+            if rt.Halted[id] then rt.Halted[id] = nil end
             Wake(id)
         end))
     end)
@@ -285,16 +269,13 @@ function RebirthService:Start(context)
         { messages.RebirthPurchaseOpen, rt.Open }, { messages.RebirthVoucherCheck, rt.Check } }
     for _, binding in ipairs(rt.Notifies) do System:BindNotify(binding[1], binding[2]) end
     context.Events:Subscribe(self.Name, "PlayerSpeedChanged", Protect(function(data)
-        local lock = rt.Locks[data.playerId]
-        if lock and lock.generation ~= data.sessionGeneration then Cancel(data.playerId) end
         Send(data.playerId)
     end))
     context.Events:Subscribe(self.Name, "HomeReleased", Protect(function(data) Cancel(data.playerId); rt.Pending[data.playerId] = nil end))
     context.Events:Subscribe(self.Name, "PersistenceReady", Protect(function(data) Wake(data.playerId) end))
     context.Events:Subscribe(self.Name, "PersistenceStateChanged", Protect(function(data)
         local paid = rt.LastPaid[data.playerId]
-        if paid and (data.state == "save_failed" or data.state == "leave_save_failed" or data.state == "previous_session_save_failed")
-            and data.generation == paid.archiveGeneration then
+        if paid and (data.state == "save_failed" or data.state == "leave_save_failed" or data.state == "previous_session_save_failed") then
             Log:PrintError("[RebirthPurchase] 已提交后的存档失败，不重扣凭证", data.playerId, paid.generation, paid.product, tostring(data.reason))
         end
     end))

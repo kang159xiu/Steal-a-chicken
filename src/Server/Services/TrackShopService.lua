@@ -1,20 +1,8 @@
 local GameConfig = require "Common.Config.GameConfig"
-local Decimal = require "Common.DecimalInteger"
+local SafeCall = require "Common.Core.SafeCall"
 local TrackShopService = { Name = "TrackShopService", FeatureFlag = "TrackShop",
     Dependencies = { "EconomyService", "PlayerSpeedService", "TreadmillService", "RebirthService" } }
 local function Integer(n) return type(n) == "number" and n >= 0 and n < math.huge and n == math.floor(n) end
-function TrackShopService:ValidateConfig()
-    local c = GameConfig.TrackShop
-    local multipliers = { 1.5, 2, 2.5, 3, 3.5, 4, 5, 7, 10 }
-    local prices = { "100", "5000", "75000", "1500000", "30000000", "750000000", "20000000000", "300000000000", "1000000000000" }
-    if type(c) ~= "table" or #c.Tracks ~= 9 or c.ImagePropertyName ~= "踪迹图片组" then return false, { "踪迹配置无效" } end
-    for i, row in ipairs(c.Tracks) do
-        if row.Name ~= "踪迹" .. i or row.Multiplier ~= multipliers[i] or row.Price ~= prices[i] or not Decimal.IsValid(row.Price) then
-            return false, { "踪迹档位配置无效: " .. i }
-        end
-    end
-    return true
-end
 function TrackShopService:Start(context)
     if context.Side ~= "Server" then return end
     local economy, speed = context.Services.EconomyService, context.Services.PlayerSpeedService
@@ -23,13 +11,8 @@ function TrackShopService:Start(context)
     local rt = { Active = true, Ready = false, Sent = {}, Requests = {}, Presentation = {}, Version = 0 }
     context.Services.TrackShopService = rt
     local function Active() return rt.Active and context.Services.TrackShopService == rt end
-    local function Protect(fn)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() fn((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+    local function Protect(callback)
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function Snapshot(id)
         if not rt.Ready or (GameConfig.Persistence.ProductionEnabled and (not persistence or not persistence:IsReady(id))) then return nil end
@@ -42,7 +25,7 @@ function TrackShopService:Start(context)
         local s = Snapshot(id)
         if not s then return end
         local old = rt.Sent[id]
-        if not force and old and old.sessionGeneration == s.sessionGeneration and old.trackVersion == s.trackVersion
+        if not force and old and old.trackVersion == s.trackVersion
             and old.trackMask == s.trackMask and old.equippedTrack == s.equippedTrack then return end
         rt.Version = rt.Version + 1; s.version = rt.Version; rt.Sent[id] = s
         System:SendToClient(id, messages.TrackShopState, s)
@@ -59,14 +42,14 @@ function TrackShopService:Start(context)
     local function PresentationCurrent(id, token)
         if not Active() or rt.Presentation[id] ~= token or not Online(id) then return false end
         local s = Snapshot(id)
-        return s and s.sessionGeneration == token.sessionGeneration and s.trackVersion == token.trackVersion
+        return s and s.trackVersion == token.trackVersion
             and s.equippedTrack == token.equippedTrack
     end
     local function SyncPresentation(id)
         local s = Snapshot(id)
         if not s or not Online(id) then return end
         local old = rt.Presentation[id]
-        if old and old.sessionGeneration == s.sessionGeneration and old.trackVersion == s.trackVersion
+        if old and old.trackVersion == s.trackVersion
             and old.equippedTrack == s.equippedTrack then return end
         CancelPresentation(id)
         local token = { sessionGeneration = s.sessionGeneration, trackVersion = s.trackVersion, equippedTrack = s.equippedTrack }
@@ -91,7 +74,7 @@ function TrackShopService:Start(context)
     end
     rt.Action = Protect(function(_, request, id)
         if not Integer(id) or id == 0 or type(request) ~= "table" or not Integer(request.requestId) or request.requestId == 0
-            or not Integer(request.sessionGeneration) or not Integer(request.trackVersion)
+            or not Integer(request.trackVersion)
             or not Integer(request.trackIndex) or not GameConfig.TrackShop.Tracks[request.trackIndex] then return end
         local function Result(success, reason)
             System:SendToClient(id, messages.TrackShopResult, { sessionGeneration = request.sessionGeneration,
@@ -99,9 +82,9 @@ function TrackShopService:Start(context)
                 success = success, reason = reason })
         end
         local s = Snapshot(id)
-        if not s or s.sessionGeneration ~= request.sessionGeneration then Result(false, "session_unavailable"); return end
+        if not s then Result(false, "session_unavailable"); return end
         local prior = rt.Requests[id]
-        if not prior or prior.generation ~= s.sessionGeneration then prior = { generation = s.sessionGeneration, last = 0 }; rt.Requests[id] = prior end
+        if not prior then prior = { generation = s.sessionGeneration, last = 0 }; rt.Requests[id] = prior end
         if request.requestId <= prior.last then Result(false, "stale_request"); return end
         prior.last = request.requestId
         local lock, reason = rebirth:TryAcquirePurchaseLock(id, s.sessionGeneration)

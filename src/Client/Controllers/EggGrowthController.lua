@@ -5,14 +5,18 @@ local EggGrowthController = { Name = "EggGrowthController", FeatureFlag = "EggPr
 local function Integer(value, minimum)
     return type(value) == "number" and value >= minimum and value < math.huge and value == math.floor(value)
 end
-local function EggConfig(eggTypeId)
-    for _, chicken in pairs(GameConfig.ChickenTypes) do
-        if chicken.Egg and chicken.Egg.EggTypeId == eggTypeId then return chicken.Egg end
-    end
-end
-
 function EggGrowthController:Start(context)
     if context.Side ~= "Client" then return end
+    local eggConfigsByType = {}
+    for _, chicken in pairs(GameConfig.ChickenTypes) do
+        local egg = chicken.Egg
+        if egg and egg.EggTypeId ~= nil and not eggConfigsByType[egg.EggTypeId] then
+            eggConfigsByType[egg.EggTypeId] = egg
+        end
+    end
+    local function EggConfig(eggTypeId)
+        return eggConfigsByType[eggTypeId]
+    end
     local config = GameConfig.EggGrowth
     local runtime = { Ready = false, Stopped = false, Entries = {}, Versions = {}, RootOwners = {}, Refreshing = {} }
     context.Services.EggGrowthController = runtime
@@ -34,16 +38,13 @@ function EggGrowthController:Start(context)
     local function Progress(state, now)
         local duration = state.hatchDeadlineMs - state.spawnedAtMs
         if duration <= 0 or now >= state.hatchDeadlineMs then
-            return state.finalScale, state.finalSellPrice, 100 + state.finalScaleUnits - config.InitialScaleUnits, 0
+            return state.finalSellPrice, 0
         end
         local elapsed = math.max(0, math.min(duration, now - state.spawnedAtMs))
         local deltaUnits = state.finalScaleUnits - config.InitialScaleUnits
-        local numerator = 100 * duration + deltaUnits * elapsed
         local price = state.baseSellPrice
             + math.floor((state.baseSellPrice * deltaUnits * elapsed + 50 * duration) / (100 * duration))
-        local multiplier = math.floor((numerator + duration / 2) / duration)
-        local scale = (config.InitialScaleUnits + deltaUnits * elapsed / duration) / 100
-        return scale, price, multiplier, (duration - elapsed) / 1000
+        return price, (duration - elapsed) / 1000
     end
     local function IndexText(entry)
         local matches, visited = { [config.ValuePurpose] = {}, [config.MultiplierPurpose] = {} }, {}
@@ -61,7 +62,7 @@ function EggGrowthController:Start(context)
         Visit(entry.state.rootId)
         entry.valueElements, entry.nameElements = matches[config.ValuePurpose], matches[config.MultiplierPurpose]
     end
-    local function UpdateText(entry, price, multiplier)
+    local function UpdateText(entry, price)
         for _, item in ipairs({ { elements = entry.valueElements, value = true }, { elements = entry.nameElements } }) do
             local formatted, text = pcall(function()
                 if item.value then return EggModelText.FormatPrice(price) end
@@ -88,8 +89,8 @@ function EggGrowthController:Start(context)
             return
         end
         IndexText(entry)
-        local _, price, multiplier, remaining = Progress(entry.state, MiscService:GetServerTimestamp())
-        UpdateText(entry, price, multiplier)
+        local price, remaining = Progress(entry.state, MiscService:GetServerTimestamp())
+        UpdateText(entry, price)
 
         if remaining <= 0 then
             return
@@ -153,8 +154,8 @@ function EggGrowthController:Start(context)
         for eggId, entry in pairs(runtime.Refreshing) do
             if not Current(entry) then runtime.Refreshing[eggId] = nil
             else
-                local _, price, multiplier, remaining = Progress(entry.state, now)
-                UpdateText(entry, price, multiplier)
+                local price, remaining = Progress(entry.state, now)
+                UpdateText(entry, price)
                 if remaining <= 0 then
                     runtime.Refreshing[eggId] = nil
                 end

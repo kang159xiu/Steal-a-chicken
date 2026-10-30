@@ -6,31 +6,10 @@ local HotbarController = {
     Dependencies = {},
 }
 
-local function IsPositiveInteger(value)
-    return type(value) == "number" and value > 0 and value == math.floor(value)
-end
+local IsPositiveInteger = require("Common.Validation").IsPositiveInteger
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
-function HotbarController:ValidateConfig(context)
-    if context.Side ~= "Client" then return true end
-    local errors = {}
-    local config = GameConfig.Hotbar
-    for _, field in ipairs({
-        "UiGroupId", "TileViewId", "TileTemplateId", "ItemButtonId",
-        "ItemImageId", "SelectedBorderId", "QuantityTextId",
-    }) do
-        if not IsPositiveInteger(config[field]) then
-            errors[#errors + 1] = "Hotbar." .. field .. " 必须是正整数"
-        end
-    end
-    return #errors == 0, errors
-end
 
 function HotbarController:Start(context)
     if context.Side ~= "Client" then return end
@@ -70,7 +49,9 @@ function HotbarController:Start(context)
 
     local function SetVisible(visible)
         runtime.Visible = visible == true
+        if runtime.LastVisible == runtime.Visible then return end
         UI:SetVisibility({ config.UiGroupId }, runtime.Visible)
+        runtime.LastVisible = runtime.Visible
     end
 
     local function ResolveImage(item)
@@ -232,7 +213,7 @@ function HotbarController:Start(context)
         end)
     end
 
-    UI:SetVisibility({ config.UiGroupId }, false)
+    SetVisible(false)
     System:BindNotify(context.NetMsg.Messages.InventorySnapshot, runtime.SnapshotCallback)
     System:BindNotify(context.NetMsg.Messages.HotbarSelectionState, runtime.SelectionCallback)
     System:BindNotify(context.NetMsg.Messages.ZoneState, runtime.ZoneCallback)

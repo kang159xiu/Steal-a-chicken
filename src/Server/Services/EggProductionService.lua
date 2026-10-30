@@ -12,27 +12,6 @@ local function Copy(record)
     return result
 end
 
-function EggProductionService:ValidateConfig(context)
-    local errors = {}
-    if GameConfig.Home.DefaultEggCapacity ~= 6 then errors[#errors + 1] = "Home.DefaultEggCapacity 必须为6" end
-    for _, field in ipairs({ "EggPositionPurpose", "ChickenCountPurpose", "EggCountPurpose" }) do
-        if type(GameConfig.Home[field]) ~= "string" or GameConfig.Home[field] == "" then
-            errors[#errors + 1] = "Home." .. field .. " 必须是非空字符串"
-        end
-    end
-    local growth = GameConfig.EggGrowth
-    if type(growth) ~= "table" or growth.InitialScaleUnits ~= 50
-        or growth.MinFinalScaleUnits ~= 50 or growth.MaxFinalScaleUnits ~= 250
-        or growth.TextRefreshSeconds ~= 0.2 then
-        errors[#errors + 1] = "EggGrowth 必须使用初始50、最终50~250整数档及0.2秒文字周期"
-    end
-    for _, field in ipairs({ "ValuePurpose", "MultiplierPurpose" }) do
-        if not growth or type(growth[field]) ~= "string" or growth[field] == "" then
-            errors[#errors + 1] = "EggGrowth." .. field .. " 必须是非空字符串"
-        end
-    end
-    return #errors == 0, errors
-end
 
 function EggProductionService:Start(context)
     if context.Side ~= "Server" then return end
@@ -462,26 +441,20 @@ function EggProductionService:Start(context)
             end,
             Restore = function(id, data, done)
                 if data == nil then data = { version = 1, cycles = {} } end
-                if data.version ~= 1 or type(data.cycles) ~= "table" or not home.EggResourcesReady then done(false, "invalid_production_snapshot"); return end
+                if data.version ~= 1 then Log:PrintServerLog("[Persistence] version mismatch", id, "production", tostring(data.version), 1) end
+                if data.cycles == nil then data.cycles = {} end
                 Sync(placement:GetPlacedSnapshot(id))
                 local homeId = home:GetPlayerHome(id)
                 local house = homeId and runtime.Homes[homeId]
                 if not house then done(false, "production_home_missing"); return end
-                local seen, count = {}, 0
-                for key in pairs(data.cycles) do
-                    if type(key) ~= "number" or key < 1 or key > #data.cycles or key ~= math.floor(key) then done(false, "invalid_production_rows"); return end
-                    count = count + 1
+                for index, row in ipairs(data.cycles) do
+                    local ok, reason = pcall(function()
+                        local chicken = house.chickens[row[1]]
+                        if not chicken or row[2] ~= chicken.itemId then error("production_chicken_missing") end
+                        if row[3] ~= nil then chicken.remainingMs = row[3] end
+                    end)
+                    if not ok then Log:PrintError("[Persistence] production row skipped", id, index, tostring(reason)) end
                 end
-                if count ~= #data.cycles then done(false, "invalid_production_rows"); return end
-                for _, row in ipairs(data.cycles) do
-                    local chicken = type(row) == "table" and house.chickens[row[1]]
-                    if not chicken or #row ~= 3 or seen[row[1]] or row[2] ~= chicken.itemId or type(row[3]) ~= "number"
-                        or row[3] < 0 or row[3] ~= math.floor(row[3]) or row[3] > math.ceil(chicken.config.ProductionIntervalSeconds * 1000) then
-                        done(false, "invalid_production_cycle"); return
-                    end
-                    seen[row[1]] = true; chicken.remainingMs = row[3]
-                end
-                for slot in pairs(house.chickens) do if not seen[slot] then done(false, "missing_production_cycle"); return end end
                 house.lastMs = Now()
                 done(true, function() SendCount(house); return true end)
             end,

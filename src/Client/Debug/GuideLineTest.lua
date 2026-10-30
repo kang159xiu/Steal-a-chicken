@@ -9,12 +9,6 @@ local function Position(p)
     end
     return Engine.Vector(p.X, p.Y, p.Z)
 end
-function GuideLineTest:ValidateConfig()
-    local c = GameConfig.GuideLineTest
-    if not c or not Integer(c.SourceElementId) or not Integer(c.TargetElementId) or c.SourceElementId == c.TargetElementId
-        or c.EffectType ~= 337 or c.UpdateSeconds ~= 0.1 then return false, { "客户端引导线测试配置无效" } end
-    return true
-end
 function GuideLineTest:Start(context)
     if context.Side ~= "Client" or context.Services.GuideLineTest then return end
     local c = GameConfig.GuideLineTest

@@ -7,25 +7,27 @@ local TheftService = {
     Dependencies = { "ZoneService", "InventoryService" },
 }
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
-local function IsPositiveInteger(value)
-    return type(value) == "number" and value > 0 and value == math.floor(value)
-end
+local IsPositiveInteger = require("Common.Validation").IsPositiveInteger
 
 local function CopyPosition(value)
     return Engine.Vector(value.X, value.Y, value.Z)
 end
 
-local function HorizontalDistance(first, second)
+local function IsFiniteNumber(value)
+    return type(value) == "number" and value == value and value > -math.huge and value < math.huge
+end
+
+local function IsFinitePosition(position)
+    return IsFiniteNumber(position.X) and IsFiniteNumber(position.Y) and IsFiniteNumber(position.Z)
+end
+
+local function PickupDistance(first, second)
     local dx = first.X - second.X
     local dy = first.Y - second.Y
-    return math.sqrt(dx * dx + dy * dy)
+    local dz = first.Z - second.Z
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
 local function ReadPurpose(elementId)
@@ -39,16 +41,17 @@ local function ReadPurpose(elementId)
     return ok, value
 end
 
-local function ChooseChickenType(pool)
+local function ChooseChickenType(pool, field)
+    field = field or "ChickenType"
     local totalWeight = 0
     for _, entry in ipairs(pool) do totalWeight = totalWeight + entry.Weight end
     local value = math.random() * totalWeight
     local cumulative = 0
     for _, entry in ipairs(pool) do
         cumulative = cumulative + entry.Weight
-        if value <= cumulative then return entry.ChickenType end
+        if value <= cumulative then return entry[field] end
     end
-    return pool[#pool].ChickenType
+    return pool[#pool][field]
 end
 
 local function ChooseSpawnPoints(allSpawnPoints, count)
@@ -89,54 +92,22 @@ local function FindSpawnPoints(region)
     return results
 end
 
-function TheftService:ValidateConfig(context)
-    if context.Side ~= "Server" then return true end
-    local errors = {}
-    if type(GameConfig.Theft.InteractionEnabled) ~= "boolean" then
-        errors[#errors + 1] = "Theft.InteractionEnabled 必须是 boolean"
-    end
-    local regionSpawnInterval = GameConfig.Theft.RegionSpawnIntervalSeconds
-    if GameConfig.Theft.ManualDropReturnSeconds ~= 30 then
-        errors[#errors + 1] = "Theft.ManualDropReturnSeconds必须为30"
-    end
-    if type(regionSpawnInterval) ~= "number" or regionSpawnInterval ~= regionSpawnInterval
-        or regionSpawnInterval <= 0 or regionSpawnInterval == math.huge then
-        errors[#errors + 1] = "Theft.RegionSpawnIntervalSeconds 必须是有限正数"
-    end
-    if type(GameConfig.Regions) ~= "table" or #GameConfig.Regions ~= 15 then
-        errors[#errors + 1] = "Regions 必须显式包含15个区域"
-    end
-    for index, region in ipairs(GameConfig.Regions or {}) do
-        if region.RegionId ~= index then
-            errors[#errors + 1] = "区域编号必须与数组顺序一致，index=" .. tostring(index)
+
+local function StartupDiagnostic(stage, fields)
+    pcall(function()
+        local values = {}
+        for name, read in pairs(fields or {}) do
+            local readOK, value = pcall(read)
+            local textOK, detail = pcall(tostring, value)
+            values[#values + 1] = name .. "=" .. (textOK and detail or "<conversion_failed>")
+                .. " readOK=" .. tostring(readOK)
         end
-        if region.Enabled then
-            if not IsPositiveInteger(region.RegionRootId) then
-                errors[#errors + 1] = "启用区域缺少 RegionRootId，region=" .. tostring(index)
-            end
-            if not IsPositiveInteger(region.SpawnPointCount) then
-                errors[#errors + 1] = "启用区域 SpawnPointCount 必须是正整数，region=" .. tostring(index)
-            end
-            if type(region.ChickenPool) ~= "table" or #region.ChickenPool == 0 then
-                errors[#errors + 1] = "启用区域鸡池不能为空，region=" .. tostring(index)
-            else
-                for poolIndex, entry in ipairs(region.ChickenPool) do
-                    local chickenConfig = GameConfig.ChickenTypes[entry.ChickenType]
-                    if not chickenConfig or chickenConfig.Enabled ~= true then
-                        errors[#errors + 1] = "鸡池引用未启用鸡类型，region=" .. tostring(index)
-                            .. " poolIndex=" .. tostring(poolIndex)
-                    end
-                    if type(entry.Weight) ~= "number" or entry.Weight <= 0 then
-                        errors[#errors + 1] = "鸡池权重必须大于0，region=" .. tostring(index)
-                    end
-                end
-            end
-        end
-    end
-    return #errors == 0, errors
+        pcall(function() Log:PrintServerLog("[TheftStartupDiag]", stage, table.concat(values, " | ")) end)
+    end)
 end
 
 function TheftService:Start(context)
+    StartupDiagnostic("start_enter", { side = function() return context.Side end })
     if context.Side ~= "Server" then return end
 
     local config = GameConfig.Theft
@@ -154,13 +125,12 @@ function TheftService:Start(context)
         ReturnReservations = {},
         PointOccupants = {},
         ChickensByRoot = {},
-        TouchedByPlayer = {},
-        HoldByPlayer = {},
+        EggAttacks = {},
+        Pickups = {},
         CarriedByPlayer = {},
         PendingByPlayer = {},
         OwnedDisplayByPlayer = {},
         OwnedDisplayRoots = {},
-        TouchCallback = nil,
         BeginCallback = nil,
         CompleteCallback = nil,
         CancelCallback = nil,
@@ -169,14 +139,102 @@ function TheftService:Start(context)
     }
 
 
-    local function SendResult(playerId, rootId, success, reason, operation, carryRetained)
+    -- PICKUP_DIAG_BEGIN
+    local function PickupDiagnostic(stage, read)
+        pcall(function()
+            Log:PrintServerLog("[PickupDiag][S]", stage, read())
+        end)
+    end
+    -- PICKUP_DIAG_END
+
+    -- DYNAMIC_DIAG_BEGIN
+    runtime.DynamicChickenDiagnostic = { generation = -1, regions = {}, failures = {} }
+    local function RecordDynamicChicken(chicken, templateId, generation, registration)
+        pcall(function()
+            local positionOK, position = pcall(function()
+                local value = chicken.pickupPosition
+                return value and (tostring(value.X) .. "," .. tostring(value.Y) .. "," .. tostring(value.Z)) or "nil"
+            end)
+            local collisionOK, collision = pcall(function() return Element:IsOpenCollision(chicken.rootId) end)
+            local ids = {}
+            for _, id in ipairs(chicken.spawnedIds or {}) do ids[#ids + 1] = tostring(id) end
+            local row = "root=" .. tostring(chicken.rootId) .. " template=" .. tostring(templateId)
+                .. " region=" .. tostring(chicken.regionId) .. " type=" .. tostring(chicken.chickenType)
+                .. " spawnedIds=[" .. table.concat(ids, ",") .. "] positionOK=" .. tostring(positionOK)
+                .. " positionSource=registration_actual_cache position=" .. tostring(position) .. " collisionOK=" .. tostring(collisionOK)
+                .. " collision=" .. tostring(collision)
+            if registration then
+                local diagnostic = runtime.DynamicChickenDiagnostic
+                if diagnostic.generation ~= generation then diagnostic.generation, diagnostic.regions, diagnostic.failures = generation, {}, {} end
+                local rows = diagnostic.regions[chicken.regionId] or {}
+                rows[#rows + 1] = row
+                diagnostic.regions[chicken.regionId] = rows
+            else
+                Log:PrintServerLog("[DynamicChickenDiag][S] single", "generation:", generation, row)
+            end
+        end)
+    end
+    local function RecordDynamicChickenFailure(regionId, pointId, chickenType, templateId, generation, reason, result)
+        pcall(function()
+            if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= generation then return end
+            local diagnostic = runtime.DynamicChickenDiagnostic
+            if diagnostic.generation ~= generation then diagnostic.generation, diagnostic.regions, diagnostic.failures = generation, {}, {} end
+            local fields = {}
+            local function Field(name, read)
+                local ok, value = pcall(function() return tostring(read()) end)
+                fields[#fields + 1] = name .. "=" .. (ok and value or "unavailable")
+            end
+            local function Ids(name)
+                if type(result) ~= "table" then return "unavailable" end
+                local ids = {}
+                for _, id in ipairs(result[name] or {}) do ids[#ids + 1] = tostring(id) end
+                return "[" .. table.concat(ids, ",") .. "]"
+            end
+            Field("generation", function() return generation end)
+            Field("region", function() return regionId end)
+            Field("pointId", function() return pointId end)
+            Field("type", function() return chickenType end)
+            Field("template", function() return templateId end)
+            Field("reason", function() return reason end)
+            Field("failedSourceId", function() return type(result) == "table" and result.failedSourceId or "unavailable" end)
+            Field("spawnedIds", function() return Ids("spawnedIds") end)
+            Field("pendingSourceIds", function() return Ids("pendingSourceIds") end)
+            local rows = diagnostic.failures[regionId] or {}
+            rows[#rows + 1] = table.concat(fields, " ")
+            diagnostic.failures[regionId] = rows
+        end)
+    end
+    local function FlushDynamicChickenRegion(regionId, generation)
+        pcall(function()
+            local diagnostic = runtime.DynamicChickenDiagnostic
+            local rows = diagnostic.generation == generation and diagnostic.regions[regionId] or {}
+            rows = rows or {}
+            local failures = diagnostic.generation == generation and diagnostic.failures[regionId] or {}
+            failures = failures or {}
+            if diagnostic.generation == generation then
+                diagnostic.regions[regionId], diagnostic.failures[regionId] = nil, nil
+            end
+            Log:PrintServerLog("[DynamicChickenDiag][S] region", "generation:", generation,
+                "region:", regionId, "successCount:", #rows, table.concat(rows, " | "),
+                "failureCount:", #failures, "failures:", table.concat(failures, " | "))
+        end)
+    end
+    -- DYNAMIC_DIAG_END
+
+    local function SendResult(playerId, rootId, success, reason, operation, carryRetained, requestOperation)
         local chicken = runtime.ChickensByRoot[rootId]
+        local currentOperation = operation or (chicken and chicken.operation)
+        local failedRequestOperation = nil
+        if not success then
+            failedRequestOperation = requestOperation or currentOperation
+        end
         System:SendToClient(playerId, context.NetMsg.Messages.PickupResult, {
             elementId = rootId,
             generation = runtime.Generation,
             success = success == true,
             reason = reason,
-            operation = operation or (chicken and chicken.operation),
+            operation = currentOperation,
+            requestOperation = failedRequestOperation,
             carryRetained = carryRetained == true,
         })
     end
@@ -197,8 +255,8 @@ function TheftService:Start(context)
         })
     end
 
-    local function Reject(playerId, rootId, reason)
-        if IsPositiveInteger(playerId) then SendResult(playerId, rootId, false, reason) end
+    local function Reject(playerId, rootId, reason, requestOperation)
+        if IsPositiveInteger(playerId) then SendResult(playerId, rootId, false, reason, nil, nil, requestOperation) end
         Log:PrintServerLog("[TheftService] 拾取请求被拒绝",
             "playerId:", tostring(playerId),
             "rootId:", tostring(rootId),
@@ -207,12 +265,13 @@ function TheftService:Start(context)
     end
 
     local function ValidateDistance(playerId, rootId)
-        local playerPosition = Character:GetPosition(playerId)
-        local chickenPosition = Element:GetPosition(rootId)
-        if not playerPosition or not chickenPosition then
+        local ok, playerPosition, chickenPosition = pcall(function()
+            return Character:GetPosition(playerId), Element:GetPosition(rootId)
+        end)
+        if not ok or not playerPosition or not chickenPosition then
             return false, nil, nil, nil, "position_unavailable"
         end
-        local distance = HorizontalDistance(playerPosition, chickenPosition)
+        local distance = PickupDistance(playerPosition, chickenPosition)
         if distance > config.MaxHorizontalDistance then
             return false, playerPosition, chickenPosition, distance, "distance_exceeded"
         end
@@ -220,19 +279,25 @@ function TheftService:Start(context)
     end
 
     local function ClearPlayerInteraction(playerId)
-        runtime.TouchedByPlayer[playerId] = nil
-        runtime.HoldByPlayer[playerId] = nil
+        runtime.Pickups[playerId] = nil
+    end
+
+    local function ClearRequest(playerId, rootId, operation)
+        local record = runtime.Pickups[playerId]
+        if not record or record.rootId ~= rootId or record.operation ~= operation then return end
+        if record.generation == runtime.Generation then
+            runtime.Pickups[playerId] = nil
+        else
+            -- 保留交互记录、只清按住计时；重建对象使重入复核能察觉这次变化。
+            runtime.Pickups[playerId] = { rootId = record.rootId, operation = record.operation,
+                generation = record.generation, inventorySession = record.inventorySession }
+        end
     end
 
     local function IsPlayerReady(playerId)
         if not GameConfig.Persistence.ProductionEnabled then return true end
         local persistence = context.Services.PersistenceService
         return persistence ~= nil and persistence:IsReady(playerId)
-    end
-
-    local function IsSessionCurrent(playerId, session)
-        return not GameConfig.Persistence.ProductionEnabled
-            or (session ~= nil and inventory:GetSessionGeneration(playerId) == session)
     end
 
     local function CheckAdmission(playerId)
@@ -250,11 +315,14 @@ function TheftService:Start(context)
             for rootId, chicken in pairs(runtime.ChickensByRoot) do
                 models[#models + 1] = { rootId = rootId, chickenType = chicken.chickenType, finalSellPrice = chicken.finalSellPrice,
                     operation = chicken.operation, generation = runtime.Generation,
-                    countdownEndMs = chicken.countdownEndMs }
+                    countdownEndMs = chicken.countdownEndMs, state = chicken.state, playerId = chicken.playerId,
+                    eggRootId = chicken.eggRootId, eggTypeId = chicken.eggTypeId, attackPlayerId = chicken.attackPlayerId,
+                    regionId = chicken.regionId, position = { X = chicken.pickupPosition.X,
+                        Y = chicken.pickupPosition.Y, Z = chicken.pickupPosition.Z }, isDropped = chicken.isDropped }
             end
         end
         runtime.ModelVersion = runtime.ModelVersion + 1
-        local message = { source = "world", playerId = 0, version = runtime.ModelVersion, models = models }
+        local message = { source = "world", playerId = 0, version = runtime.ModelVersion, generation = runtime.Generation, models = models }
         local ok, reason = pcall(function()
             if recipient then System:SendToClient(recipient, context.NetMsg.Messages.ChickenModelState, message)
             else System:SendToAllClients(context.NetMsg.Messages.ChickenModelState, message) end
@@ -262,6 +330,29 @@ function TheftService:Start(context)
         if not ok then Log:PrintError("[TheftService] 世界鸡表现快照发送失败", tostring(reason)) end
     end
     runtime.SendWorldModels = SendWorldModels
+
+    local function SendEggAttackSignal(playerId, signalName)
+        local ok, reason = pcall(function() System:FireSignEvent(signalName, { playerId }) end)
+        if not ok then Log:PrintError("[TheftService] 破蛋动作信号失败", playerId, signalName, tostring(reason)) end
+    end
+
+    local function CancelEggAttack(playerId, broadcast)
+        local chicken = runtime.EggAttacks[playerId]
+        if not chicken then return end
+        runtime.EggAttacks[playerId] = nil
+        if chicken.breakTimerId then context.Timers:Remove(chicken.breakTimerId); chicken.breakTimerId = nil end
+        chicken.attackPlayerId = nil
+        if chicken.state == "EggAttacking" then chicken.state = "Egg" end
+        SendEggAttackSignal(playerId, "停止破蛋动作")
+        if broadcast then SendWorldModels() end
+    end
+    local function ClearHatch(chicken)
+        if chicken.attackPlayerId then CancelEggAttack(chicken.attackPlayerId, false) end
+        if chicken.growthTimerId then context.Timers:Remove(chicken.growthTimerId); chicken.growthTimerId = nil end
+        if chicken.state == "Hatching" then Element:StopScaleTo(chicken.rootId) end
+        if chicken.eggRootId then context.ElementCopy:DestroyTree(chicken.eggRootId); chicken.eggRootId = nil end
+    end
+    runtime.ClearHatch = ClearHatch
 
     -- 点位归属由业务迁移维护，不因引擎位置微小漂移而丢失。
     -- 拾取离点释放占用；到期新个体生成前同步预占，不为旧鸡保留返回点。
@@ -287,15 +378,14 @@ function TheftService:Start(context)
 
     local function ClearRootInteraction(chicken, operation)
         local players = {}
-        for playerId, rootId in pairs(runtime.TouchedByPlayer) do
-            if rootId == chicken.rootId then players[playerId] = true end
+        for playerId, record in pairs(runtime.Pickups) do
+            if record.rootId == chicken.rootId and record.operation == operation then players[playerId] = record end
         end
-        for playerId, hold in pairs(runtime.HoldByPlayer) do
-            if hold.rootId == chicken.rootId then players[playerId] = true end
-        end
-        for playerId in pairs(players) do
-            ClearPlayerInteraction(playerId)
-            SendResult(playerId, chicken.rootId, false, "chicken_relocated", operation)
+        for playerId, request in pairs(players) do
+            if runtime.Pickups[playerId] == request then
+                ClearRequest(playerId, chicken.rootId, operation)
+                SendResult(playerId, chicken.rootId, false, "chicken_relocated", chicken.operation, nil, operation)
+            end
         end
     end
 
@@ -304,6 +394,12 @@ function TheftService:Start(context)
     local function CopyChicken(region, pointId, chickenType, position, generation, onFinished, reservation, registration)
         local templateId = GameConfig.ChickenTypes[chickenType].TemplateRootId
         local completed, accepted, cleaned = false, {}, {}
+        local failureRecorded = false
+        local function RecordFailure(reason, result)
+            if not registration or failureRecorded then return end
+            failureRecorded = true
+            RecordDynamicChickenFailure(region.RegionId, pointId, chickenType, templateId, generation, reason, result)
+        end
         local function Current()
             return not runtime.Stopped and context.Services.TheftService == runtime
                 and runtime.Generation == generation
@@ -328,7 +424,10 @@ function TheftService:Start(context)
             -- 底层失败仅返回仍由调用方持有的部分实例；按生成逆序销毁一次，避免整树/子级重复清理。
             local ids, seen = {}, {}
             if result.rootId then ids[1], seen[result.rootId] = result.rootId, true end
-            for _, id in ipairs(result.spawnedIds or {}) do
+            local allIds = {}
+            for _, id in ipairs(result.spawnedIds or {}) do allIds[#allIds + 1] = id end
+            for _, id in ipairs(result.eggSpawnedIds or {}) do allIds[#allIds + 1] = id end
+            for _, id in ipairs(allIds) do
                 if not seen[id] then ids[#ids + 1], seen[id] = id, true end
             end
             for index = #ids, 1, -1 do
@@ -347,7 +446,7 @@ function TheftService:Start(context)
             if not ok and not runtime.Stopped and context.Services.TheftService == runtime
                 and runtime.Generation == generation then context.Manager:FailModule(TheftService.Name, reason) end
         end
-        local function Finish(result)
+        local function RegisterResult(result)
             if completed then Cleanup(result); return end
             if not Current() then
                 completed = true
@@ -357,6 +456,7 @@ function TheftService:Start(context)
             end
             completed = true
             if type(result) == "table" and result.success == false then
+                RecordFailure(result.reason, result)
                 Cleanup(result)
                 LogFailure(result.reason)
                 ReleaseReservation()
@@ -369,6 +469,7 @@ function TheftService:Start(context)
                 if not registered then return end
                 accepted[result.rootId] = true
                 for _, id in ipairs(result.spawnedIds or {}) do accepted[id] = true end
+                for _, id in ipairs(result.eggSpawnedIds or {}) do accepted[id] = true end
             end, Traceback)
             ReleaseReservation()
             if not ok then
@@ -382,6 +483,33 @@ function TheftService:Start(context)
                 Complete(true)
             end
         end
+        local function Finish(result)
+            if not Current() or not result.success or completed then RegisterResult(result); return end
+            -- 同一点先备好鸡，再复制本区蛋；两者准备完毕才计为本次生成完成。
+            local eggTypeId = ChooseChickenType(region.EggPool, "EggTypeId")
+            local eggConfig
+            for _, entry in pairs(GameConfig.ChickenTypes) do
+                if entry.Egg.EggTypeId == eggTypeId then eggConfig = entry.Egg; break end
+            end
+            local ok, reason = pcall(function()
+                Element:SetScale(result.rootId, Engine.Vector(config.HatchInitialScale, config.HatchInitialScale, config.HatchInitialScale))
+                context.ElementCopy:CopyTree(eggConfig.TemplateRootId, CopyPosition(position), "偷取区蛋", function(eggResult)
+                    result.eggSpawnedIds = eggResult.spawnedIds
+                    if not Current() or completed then Cleanup(result); Cleanup(eggResult); return end
+                    if not eggResult.success then
+                        result.success, result.reason = false, "egg_copy_failed: " .. tostring(eggResult.reason)
+                        result.failedSourceId, result.pendingSourceIds = eggResult.failedSourceId, eggResult.pendingSourceIds
+                    else
+                        result.eggRootId, result.eggTypeId = eggResult.rootId, eggTypeId
+                    end
+                    RegisterResult(result)
+                end)
+            end)
+            if not ok and not completed then
+                result.success, result.reason = false, "egg_copy_failed: " .. tostring(reason)
+                RegisterResult(result)
+            end
+        end
         local ok, reason = pcall(function()
             context.ElementCopy:CopyTree(templateId, CopyPosition(position),
                 "区域" .. tostring(region.RegionId) .. "生成点" .. tostring(pointId) .. "鸡", Finish)
@@ -389,6 +517,7 @@ function TheftService:Start(context)
         if not ok then
             LogFailure(reason)
             if completed then return end
+            RecordFailure(reason, nil)
             completed = true
             ReleaseReservation()
             if not runtime.Stopped and context.Services.TheftService == runtime and runtime.Generation == generation then
@@ -482,21 +611,39 @@ function TheftService:Start(context)
         if not spawnPosition then
             error("无法读取生成点位置，spawnPointId=" .. tostring(spawnPointId))
         end
-        local finalSellPrice = math.floor(chickenConfig.ChickenSellPrice * (1 + math.random() * 4))
+        local multiplier = 1
+        if math.random(1, config.HighMultiplierChanceDenominator) == 1 then
+            multiplier = config.HighMultiplierMin + math.random() * (config.HighMultiplierMax - config.HighMultiplierMin)
+        end
+        local finalSellPrice = math.floor(chickenConfig.ChickenSellPrice * multiplier)
         if not Decimal.FromSafeInteger(finalSellPrice) then error("生成鸡独立售价必须是非负安全整数") end
+        CustomProperty:SetCustomProperty(result.rootId, config.RegionProperty, CustomProperty.PROPERTY_TYPE.Number, region.RegionId)
+        local scale = finalSellPrice / chickenConfig.ChickenSellPrice
+        Element:SetScale(result.eggRootId, Engine.Vector(scale, scale, scale))
+        Element:SetEnableCollision(result.eggRootId, false)
+        local pickupPosition = Element:GetPosition(result.rootId)
+        if not pickupPosition or not IsFinitePosition(pickupPosition) then
+            error("无法读取有效鸡根实际位置，rootId=" .. tostring(result.rootId))
+        end
         runtime.ChickensByRoot[result.rootId] = {
             rootId = result.rootId,
             spawnedIds = result.spawnedIds,
             regionId = region.RegionId,
             spawnPointId = spawnPointId,
             spawnPosition = CopyPosition(spawnPosition),
+            pickupPosition = CopyPosition(pickupPosition),
+            isDropped = false,
             chickenType = chickenType,
             finalSellPrice = finalSellPrice,
-            state = "Available",
+            finalScale = scale,
+            eggRootId = result.eggRootId,
+            eggTypeId = result.eggTypeId,
+            state = "Egg",
             playerId = nil,
             operation = 0,
         }
         ClaimPoint(runtime.ChickensByRoot[result.rootId])
+        RecordDynamicChicken(runtime.ChickensByRoot[result.rootId], chickenConfig.TemplateRootId, generation, registration) -- DYNAMIC_DIAG
         if not registration then SendWorldModels() end
         return true
     end
@@ -511,25 +658,47 @@ function TheftService:Start(context)
         local spawnPoints = ChooseSpawnPoints(allSpawnPoints, region.SpawnPointCount)
         local registration = true -- 区域批量登记，仅区域全部请求结束后广播。
         local completedCount = 0
-        for _, spawnPointId in ipairs(spawnPoints) do
+        local function SpawnNextPoint()
             if runtime.Stopped or context.Services.TheftService ~= runtime
                 or runtime.Generation ~= generation then
                 return end
-            local currentSpawnPointId = spawnPointId
+            if completedCount == region.SpawnPointCount then
+                SendWorldModels()
+                FlushDynamicChickenRegion(region.RegionId, generation) -- DYNAMIC_DIAG
+                onComplete()
+                return
+            end
+            local currentSpawnPointId = spawnPoints[completedCount + 1]
             local position = Element:GetPosition(currentSpawnPointId)
             if not position then
                 error("无法读取鸡生成点位置，spawnPointId=" .. tostring(currentSpawnPointId))
             end
-            local currentChickenType = ChooseChickenType(region.ChickenPool)
-            CopyChicken(region, currentSpawnPointId, currentChickenType, position, generation, function()
+            local remainingPool = {}
+            for index, entry in ipairs(region.ChickenPool) do remainingPool[index] = entry end
+            local function TryNextType()
                 if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= generation then return end
-                completedCount = completedCount + 1
-                if completedCount == region.SpawnPointCount then
-                    SendWorldModels()
-                    onComplete()
+                if #remainingPool == 0 then
+                    completedCount = completedCount + 1
+                    SpawnNextPoint()
+                    return
                 end
-            end, nil, registration)
+                local currentChickenType = ChooseChickenType(remainingPool)
+                for index = #remainingPool, 1, -1 do
+                    if remainingPool[index].ChickenType == currentChickenType then table.remove(remainingPool, index) end
+                end
+                CopyChicken(region, currentSpawnPointId, currentChickenType, position, generation, function(success)
+                    if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= generation then return end
+                    if success then
+                        completedCount = completedCount + 1
+                        SpawnNextPoint()
+                    else
+                        TryNextType()
+                    end
+                end, nil, registration)
+            end
+            TryNextType()
         end
+        SpawnNextPoint()
     end
 
     local function DropPlayerChicken(playerId, reason)
@@ -541,6 +710,7 @@ function TheftService:Start(context)
         local position = Character:GetPosition(playerId)
         if not position then error("原地掉鸡无法读取玩家世界位置") end
         local dropPosition = CopyPosition(position)
+        dropPosition.Z = chicken.pickupPosition.Z
         PauseCountdown(chicken)
         ReleasePoint(chicken)
         local previousOperation = chicken.operation
@@ -568,8 +738,11 @@ function TheftService:Start(context)
             Element:SetPosition(rootId, dropPosition, Element.COORDINATE.World)
             context.Timers:AddFrame(TheftService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
                 if not Current() then return end
-                if not Element:GetPosition(rootId) then error("原地掉鸡落地后无法读取位置") end
+                local landedPosition = Element:GetPosition(rootId)
+                if not landedPosition or not IsFinitePosition(landedPosition) then error("原地掉鸡落地后无法读取有效位置") end
                 if IsPositiveInteger(Element:GetAttachParentCharacter(rootId)) then error("掉落鸡仍附加角色") end
+                chicken.pickupPosition = CopyPosition(landedPosition)
+                chicken.isDropped = true
                 chicken.manualRepickup = true
                 chicken.state = "Available"
                 StartCountdown(chicken)
@@ -594,10 +767,26 @@ function TheftService:Start(context)
         DropPlayerChicken(playerId, "manual")
     end
 
+    function runtime:IsCarryingChicken(playerId, rootId, operation, generation)
+        local chicken = self.ChickensByRoot[rootId]
+        return context.Services.TheftService == self and self.Ready and not self.Stopped and not self.Refreshing
+            and self.Generation == generation and self.CarriedByPlayer[playerId] == rootId
+            and chicken ~= nil and chicken.state == "Carried" and chicken.playerId == playerId
+            and chicken.operation == operation
+    end
+
+    function runtime:IsWorldChickenRoot(rootId)
+        return self.ChickensByRoot[rootId] ~= nil
+    end
+
     runtime.CarrySnapshotCallback = function(_, message, playerId)
         if not IsPositiveInteger(playerId) then return end
         for _, onlineId in ipairs(Character:GetAllPlayerIds() or {}) do
-            if onlineId == playerId then SendCarryState(playerId) return end
+            if onlineId == playerId then
+                zone:SendState(playerId)
+                SendCarryState(playerId)
+                return
+            end
         end
     end
 
@@ -625,17 +814,20 @@ function TheftService:Start(context)
     end
 
     local function AcquireChicken(playerId, rootId)
+        PickupDiagnostic("acquire_enter", function() return "player=" .. tostring(playerId) .. " root=" .. tostring(rootId) .. " generation=" .. tostring(runtime.Generation) end) -- PICKUP_DIAG
         local chicken = runtime.ChickensByRoot[rootId]
-        if not chicken or chicken.state ~= "Carried" or chicken.playerId ~= playerId then return end
-        local allowed, admissionReason = CheckAdmission(playerId)
-        if not IsSessionCurrent(playerId, chicken.inventorySession) then
-            allowed, admissionReason = false, "persistence_not_ready"
+        if not chicken or chicken.state ~= "Carried" or chicken.playerId ~= playerId then
+            PickupDiagnostic("acquire_reject_identity", function() return "player=" .. tostring(playerId) .. " root=" .. tostring(rootId) .. " state=" .. tostring(chicken and chicken.state) .. " owner=" .. tostring(chicken and chicken.playerId) end) -- PICKUP_DIAG
+            return
         end
+        local allowed, admissionReason = CheckAdmission(playerId)
+        PickupDiagnostic("acquire_admission", function() return "player=" .. tostring(playerId) .. " root=" .. tostring(rootId) .. " allowed=" .. tostring(allowed) .. " reason=" .. tostring(admissionReason) end) -- PICKUP_DIAG
         if not allowed then
             SendResult(playerId, rootId, false, admissionReason, chicken.operation, true)
             return
         end
         local item, reason = inventory:AddChicken(playerId, chicken.chickenType, chicken.finalSellPrice)
+        PickupDiagnostic("acquire_add_return", function() return "player=" .. tostring(playerId) .. " root=" .. tostring(rootId) .. " itemId=" .. tostring(item and item.itemId) .. " accepted=" .. tostring(item ~= nil and item ~= false) .. " reason=" .. tostring(reason) end) -- PICKUP_DIAG
         if not item then
             if reason == "inventory_capacity_full" or reason == "persistence_not_ready" then
                 SendResult(playerId, rootId, false, reason, chicken.operation, true)
@@ -660,7 +852,6 @@ function TheftService:Start(context)
             operation = chicken.operation,
             generation = runtime.Generation,
         })
-        Element:SetEnableCollision(rootId, false)
         if hotbar then
             local adopted, adoptReason = hotbar:AdoptExistingDisplay(playerId, item.itemId, rootId)
             if not adopted then error("快捷栏接管带回鸡树失败: " .. tostring(adoptReason)) end
@@ -687,140 +878,151 @@ function TheftService:Start(context)
             "chickenType:", chicken.chickenType)
     end
 
-    runtime.TouchCallback = function(elementId, playerId)
-        if runtime.Refreshing then return end
-        local chicken = runtime.ChickensByRoot[elementId]
-        if not chicken or chicken.state ~= "Available" or not IsPositiveInteger(playerId) then return end
-        if not CheckCountdown(chicken) then return end
-        if not zone:IsInStolenArea(playerId) then return end
-        if runtime.CarriedByPlayer[playerId] or runtime.PendingByPlayer[playerId] then return end
-        runtime.TouchedByPlayer[playerId] = elementId
-        System:SendToClient(playerId, context.NetMsg.Messages.PickupShow, {
-            elementId = elementId,
-            generation = runtime.Generation,
-            operation = chicken.operation,
-        })
+    local function ValidPickupRequest(message, playerId)
+        return type(message) == "table" and IsPositiveInteger(playerId)
+            and IsPositiveInteger(message.elementId) and type(message.operation) == "number"
+            and message.operation >= 0 and message.operation == math.floor(message.operation)
+            and message.generation == runtime.Generation
+    end
+
+    runtime.EggBreakBeginCallback = function(_, message, playerId)
+        if not ValidPickupRequest(message, playerId) or not IsPositiveInteger(message.requestId) then return end
+        local chicken = runtime.ChickensByRoot[message.elementId]
+        local function Reply(success, reason)
+            System:SendToClient(playerId, context.NetMsg.Messages.EggBreakResult, {
+                elementId = message.elementId, operation = message.operation, generation = message.generation,
+                requestId = message.requestId, success = success, reason = reason })
+        end
+        if runtime.Refreshing or not chicken or chicken.operation ~= message.operation or chicken.state ~= "Egg"
+            or runtime.EggAttacks[playerId] or runtime.CarriedByPlayer[playerId] or runtime.PendingByPlayer[playerId]
+            or runtime.Pickups[playerId] or not zone:IsInStolenArea(playerId) then Reply(false, "unavailable"); return end
+        local valid, _, _, _, reason = ValidateDistance(playerId, chicken.rootId)
+        if not valid then Reply(false, reason); return end
+        runtime.EggAttacks[playerId] = chicken
+        chicken.state, chicken.attackPlayerId = "EggAttacking", playerId
+        chicken.attackRequestId = message.requestId
+        SendEggAttackSignal(playerId, "播放破蛋动作")
+        local generation, operation, requestId = runtime.Generation, chicken.operation, message.requestId
+        chicken.breakTimerId = context.Timers:AddTimer(TheftService.Name, config.EggBreakSeconds, function()
+            if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= generation
+                or runtime.ChickensByRoot[chicken.rootId] ~= chicken or runtime.EggAttacks[playerId] ~= chicken
+                or chicken.state ~= "EggAttacking" or chicken.operation ~= operation
+                or chicken.attackRequestId ~= requestId then return end
+            chicken.breakTimerId = nil
+            local inRange = ValidateDistance(playerId, chicken.rootId)
+            if not inRange or not zone:IsInStolenArea(playerId) or runtime.CarriedByPlayer[playerId]
+                or runtime.PendingByPlayer[playerId] then CancelEggAttack(playerId, true); return end
+            runtime.EggAttacks[playerId] = nil
+            chicken.attackPlayerId = nil
+            chicken.state = "Hatching"
+            SendEggAttackSignal(playerId, "停止破蛋动作")
+            context.ElementCopy:DestroyTree(chicken.eggRootId)
+            chicken.eggRootId = nil
+            Element:ScaleTo(chicken.rootId, Engine.Vector(chicken.finalScale, chicken.finalScale, chicken.finalScale),
+                config.HatchGrowthSeconds, Element.CURVE.linear,
+                Engine.Vector(config.HatchInitialScale, config.HatchInitialScale, config.HatchInitialScale))
+            chicken.growthTimerId = context.Timers:AddTimer(TheftService.Name, config.HatchGrowthSeconds, function()
+                if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= generation
+                    or runtime.ChickensByRoot[chicken.rootId] ~= chicken or chicken.state ~= "Hatching" then return end
+                chicken.growthTimerId = nil
+                Element:StopScaleTo(chicken.rootId)
+                Element:SetScale(chicken.rootId, Engine.Vector(chicken.finalScale, chicken.finalScale, chicken.finalScale))
+                chicken.state = "Available"
+                SendWorldModels()
+            end)
+            SendWorldModels()
+        end)
+        SendWorldModels()
+        Reply(true, "attacking")
+    end
+    runtime.EggBreakCancelCallback = function(_, message, playerId)
+        if not ValidPickupRequest(message, playerId) then return end
+        local chicken = runtime.EggAttacks[playerId]
+        if chicken and chicken.rootId == message.elementId and chicken.operation == message.operation
+            and chicken.attackRequestId == message.requestId then CancelEggAttack(playerId, true) end
     end
 
     runtime.BeginCallback = function(_, message, playerId)
-        if runtime.Refreshing then Reject(playerId, nil, "refreshing") return end
-        if type(message) ~= "table" or not IsPositiveInteger(playerId)
-            or not IsPositiveInteger(message.elementId) then
-            Reject(playerId, nil, "invalid_begin_message")
-            return
+        if not ValidPickupRequest(message, playerId) then return end
+        if runtime.EggAttacks[playerId] then return end
+        local rootId, operation, generation = message.elementId, message.operation, message.generation
+        local prior = runtime.Pickups[playerId]
+        local function Refuse(reason)
+            if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= generation
+                or runtime.Pickups[playerId] ~= prior then return end
+            ClearRequest(playerId, rootId, operation)
+            Reject(playerId, rootId, reason, operation)
         end
-        local rootId = message.elementId
-        if message.generation ~= runtime.Generation then return end
+        if runtime.Refreshing then Refuse("refreshing") return end
         local chicken = runtime.ChickensByRoot[rootId]
-        if chicken and message.operation ~= chicken.operation then return end
-        if chicken and not CheckCountdown(chicken) then return end
-        if runtime.TouchedByPlayer[playerId] ~= rootId or not chicken
-            or chicken.state ~= "Available" or message.operation ~= chicken.operation then
-            Reject(playerId, rootId, "target_not_available")
-            return
-        end
-        if not zone:IsInStolenArea(playerId) then
-            Reject(playerId, rootId, "not_in_stolen_area")
-            return
-        end
-        if runtime.CarriedByPlayer[playerId] or runtime.PendingByPlayer[playerId] then
-            Reject(playerId, rootId, "player_already_carrying")
-            return
-        end
+        if not chicken or chicken.operation ~= operation or chicken.state ~= "Available"
+            then Refuse("target_not_available") return end
+        if not CheckCountdown(chicken) then Refuse("target_expired") return end
+        if not zone:IsInStolenArea(playerId) then Refuse("not_in_stolen_area") return end
+        if runtime.CarriedByPlayer[playerId] or runtime.PendingByPlayer[playerId] then Refuse("player_already_carrying") return end
+        local session = inventory:GetSessionGeneration(playerId)
         local valid, _, _, _, reason = ValidateDistance(playerId, rootId)
-        if not valid then Reject(playerId, rootId, reason) return end
         local allowed, admissionReason = CheckAdmission(playerId)
-        if not allowed then
-            ClearPlayerInteraction(playerId)
-            Reject(playerId, rootId, admissionReason)
-            return
-        end
-        runtime.HoldByPlayer[playerId] = {
-            rootId = rootId,
-            operation = chicken.operation,
-            inventorySession = inventory:GetSessionGeneration(playerId),
-            startedAtMs = MiscService:GetServerTimestamp(),
-        }
+        -- 引擎读取/依赖服务可能同步重入；旧检查不得覆盖后来建立的交互。
+        if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= generation
+            or runtime.Pickups[playerId] ~= prior then return end
+        if runtime.ChickensByRoot[rootId] ~= chicken or chicken.operation ~= operation
+            or chicken.state ~= "Available" then Refuse("target_not_available") return end
+        if not valid then Refuse(reason) return end
+        if not allowed then Refuse(admissionReason) return end
+        local startedAtMs = MiscService:GetServerTimestamp()
+        if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= generation
+            or runtime.Pickups[playerId] ~= prior then return end
+        runtime.Pickups[playerId] = { rootId = rootId, operation = operation,
+            generation = generation, inventorySession = session, startedAtMs = startedAtMs }
     end
 
     runtime.CancelCallback = function(_, message, playerId)
-        if type(message) ~= "table" or not IsPositiveInteger(playerId)
-            or not IsPositiveInteger(message.elementId)
-            or (message.reason ~= "button_released"
-                and message.reason ~= "horizontal_distance_exceeded") then
-            Log:PrintWarning("[TheftService] 拒绝无效拾取取消请求",
-                "playerId:", tostring(playerId),
-                "messageType:", type(message))
-            return
-        end
-        local rootId = message.elementId
-        if message.generation ~= runtime.Generation then return end
-        local hold = runtime.HoldByPlayer[playerId]
-        if hold and hold.rootId == rootId and message.operation == hold.operation then
-            runtime.HoldByPlayer[playerId] = nil
-        end
-        if message.reason == "horizontal_distance_exceeded"
-            and runtime.TouchedByPlayer[playerId] == rootId then
-            local chicken = runtime.ChickensByRoot[rootId]
-            if not chicken or chicken.operation ~= message.operation then return end
-            runtime.TouchedByPlayer[playerId] = nil
+        if not ValidPickupRequest(message, playerId) then return end
+        if message.reason ~= "button_released" and message.reason ~= "distance_exceeded"
+            and message.reason ~= "position_unavailable" and message.reason ~= "target_not_available"
+            and message.reason ~= "not_in_stolen_area" then return end
+        local rootId, operation = message.elementId, message.operation
+        local record = runtime.Pickups[playerId]
+        if record and record.rootId == rootId and record.operation == operation then
+            if message.reason == "button_released" then
+                -- 只清按住计时、保留交互记录；重建对象使重入复核能察觉这次变化。
+                runtime.Pickups[playerId] = { rootId = record.rootId, operation = record.operation,
+                    generation = record.generation, inventorySession = record.inventorySession }
+            else
+                ClearRequest(playerId, rootId, operation)
+            end
         end
     end
 
     runtime.CompleteCallback = function(_, message, playerId)
-        if runtime.Refreshing then Reject(playerId, nil, "refreshing") return end
-        if type(message) ~= "table" or not IsPositiveInteger(playerId)
-            or not IsPositiveInteger(message.elementId) then
-            Reject(playerId, nil, "invalid_complete_message")
-            return
+        if not ValidPickupRequest(message, playerId) then return end
+        local rootId, requestOperation, requestGeneration = message.elementId, message.operation, message.generation
+        local prior = runtime.Pickups[playerId]
+        local function Refuse(reason)
+            if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= requestGeneration
+                or runtime.Pickups[playerId] ~= prior then return end
+            ClearRequest(playerId, rootId, requestOperation)
+            Reject(playerId, rootId, reason, requestOperation)
         end
-        local rootId = message.elementId
-        if message.generation ~= runtime.Generation then return end
-        local hold = runtime.HoldByPlayer[playerId]
-        local chicken = runtime.ChickensByRoot[rootId]
-        if not chicken or message.operation ~= chicken.operation
-            or (hold and hold.operation ~= chicken.operation) then return end
-        if not CheckCountdown(chicken) then return end
-        if not hold or hold.rootId ~= rootId then Reject(playerId, rootId, "hold_not_started") return end
+        if runtime.Refreshing then Refuse("refreshing") return end
+        local record, chicken = runtime.Pickups[playerId], runtime.ChickensByRoot[rootId]
+        if not chicken or chicken.operation ~= requestOperation or chicken.state ~= "Available" then Refuse("target_not_available") return end
+        if not CheckCountdown(chicken) then Refuse("target_expired") return end
+        if not record or not record.startedAtMs or record.rootId ~= rootId
+            or record.operation ~= requestOperation then Refuse("hold_not_started") return end
         local allowed, admissionReason = CheckAdmission(playerId)
-        if not IsSessionCurrent(playerId, hold.inventorySession) then
-            allowed, admissionReason = false, "persistence_not_ready"
-        end
-        if not allowed then
-            ClearPlayerInteraction(playerId)
-            Reject(playerId, rootId, admissionReason)
-            return
-        end
-        local elapsedMs = MiscService:GetServerTimestamp() - hold.startedAtMs
-        if elapsedMs < config.HoldSeconds * 1000 then
-            runtime.HoldByPlayer[playerId] = nil
-            Reject(playerId, rootId, "server_hold_time_not_reached")
-            return
-        end
-        if not chicken or chicken.state ~= "Available" then
-            ClearPlayerInteraction(playerId)
-            Reject(playerId, rootId, "target_not_available")
-            return
-        end
-        if runtime.CarriedByPlayer[playerId] or runtime.PendingByPlayer[playerId] then
-            ClearPlayerInteraction(playerId)
-            Reject(playerId, rootId, "player_already_carrying")
-            return
-        end
-        if not zone:IsInStolenArea(playerId) then Reject(playerId, rootId, "not_in_stolen_area") return end
+        if not allowed then Refuse(admissionReason) return end
+        local elapsedMs = MiscService:GetServerTimestamp() - record.startedAtMs
+        if elapsedMs < config.HoldSeconds * 1000 then Refuse("server_hold_time_not_reached") return end
+        if runtime.CarriedByPlayer[playerId] or runtime.PendingByPlayer[playerId] then Refuse("player_already_carrying") return end
+        if not zone:IsInStolenArea(playerId) then Refuse("not_in_stolen_area") return end
         local valid, playerPosition, chickenPosition, distance, distanceReason = ValidateDistance(playerId, rootId)
-        if not valid then
-            ClearPlayerInteraction(playerId)
-            Reject(playerId, rootId, distanceReason)
-            return
-        end
-        local propertyOk, purpose = ReadPurpose(rootId)
-        local chickenConfig = GameConfig.ChickenTypes[chicken.chickenType]
-        if not propertyOk or purpose ~= chickenConfig.RequiredPurpose then
-            ClearPlayerInteraction(playerId)
-            Reject(playerId, rootId, "chicken_purpose_mismatch")
-            return
-        end
+        if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= requestGeneration
+            or runtime.Pickups[playerId] ~= prior then return end
+        if runtime.ChickensByRoot[rootId] ~= chicken or chicken.operation ~= requestOperation
+            or chicken.state ~= "Available" then Refuse("target_not_available") return end
+        if not valid then Refuse(distanceReason) return end
 
         ClearPlayerInteraction(playerId)
         PauseCountdown(chicken)
@@ -832,9 +1034,8 @@ function TheftService:Start(context)
         local generation = runtime.Generation
         local pickupPosition = CopyPosition(chickenPosition)
         local manualRepickup = chicken.manualRepickup == true
-        local inventorySession = hold.inventorySession
+        local inventorySession = record.inventorySession
         chicken.inventorySession = inventorySession
-        SendWorldModels()
         runtime.PendingByPlayer[playerId] = rootId
         local function PendingCurrent()
             return not runtime.Stopped and context.Services.TheftService == runtime
@@ -845,14 +1046,14 @@ function TheftService:Start(context)
         local function ValidatePending()
             if not PendingCurrent() then return false end
             local validAdmission, pendingReason = CheckAdmission(playerId)
-            if not IsSessionCurrent(playerId, inventorySession) then
-                validAdmission, pendingReason = false, "persistence_not_ready"
-            end
+            if not PendingCurrent() then return false end
             if validAdmission then return true end
-            SendResult(playerId, rootId, false, pendingReason, message.operation)
-            DropPlayerChicken(playerId, "pickup_interrupted")
+            SendResult(playerId, rootId, false, pendingReason, operation, nil, requestOperation)
+            if PendingCurrent() then DropPlayerChicken(playerId, "pickup_interrupted") end
             return false
         end
+        SendWorldModels()
+        if not PendingCurrent() then return end
         Element:SetPosition(rootId, Engine.Vector(
             playerPosition.X,
             playerPosition.Y,
@@ -871,6 +1072,7 @@ function TheftService:Start(context)
                 if Element:GetAttachParentCharacter(rootId) ~= playerId then
                     error("正式拾取附加验证失败，rootId=" .. tostring(rootId))
                 end
+                if not PendingCurrent() then return end
                 runtime.PendingByPlayer[playerId] = nil
                 runtime.CarriedByPlayer[playerId] = rootId
                 chicken.state = "Carried"
@@ -902,12 +1104,14 @@ function TheftService:Start(context)
     end
     runtime.FatalDamageCallback = function(playerId)
         if IsPositiveInteger(playerId) then
+            CancelEggAttack(playerId, true)
             DropPlayerChicken(playerId, "fatal_damage")
             ClearOwnedDisplay(playerId, "fatal_damage")
         end
     end
     runtime.PreleaveCallback = function(playerId)
         if not IsPositiveInteger(playerId) then return end
+        CancelEggAttack(playerId, true)
         local persistence = context.Services.PersistenceService
         if GameConfig.Persistence.ProductionEnabled and persistence then persistence:PrepareLeave(playerId) end
         DropPlayerChicken(playerId, "player_preleave")
@@ -933,8 +1137,9 @@ function TheftService:Start(context)
         end
     end
 
-    runtime.TouchCallback = ProtectCallback("鸡碰撞回调失败", runtime.TouchCallback)
     runtime.BeginCallback = ProtectCallback("开始按住请求回调失败", runtime.BeginCallback)
+    runtime.EggBreakBeginCallback = ProtectCallback("开始破蛋失败", runtime.EggBreakBeginCallback)
+    runtime.EggBreakCancelCallback = ProtectCallback("取消破蛋失败", runtime.EggBreakCancelCallback)
     runtime.CompleteCallback = ProtectCallback("完成拾取请求回调失败", runtime.CompleteCallback)
     runtime.CancelCallback = ProtectCallback("取消拾取请求回调失败", runtime.CancelCallback)
     runtime.BeforeHurtCallback = ProtectCallback("受伤前掉鸡回调失败", runtime.BeforeHurtCallback)
@@ -951,6 +1156,8 @@ function TheftService:Start(context)
     System:BindNotify(context.NetMsg.Messages.ChickenModelSnapshotRequest, runtime.ModelSnapshotCallback)
     if config.InteractionEnabled then
         context.Events:Subscribe(TheftService.Name, "ZoneChanged", function(snapshot)
+            if snapshot.inStolenArea == false then CancelEggAttack(snapshot.playerId, true) end
+            PickupDiagnostic("zone_changed", function() return "player=" .. tostring(snapshot.playerId) .. " inStolenArea=" .. tostring(snapshot.inStolenArea) .. " carriedRoot=" .. tostring(runtime.CarriedByPlayer[snapshot.playerId]) .. " refreshing=" .. tostring(runtime.Refreshing) .. " willAcquire=" .. tostring(snapshot.inStolenArea == false and not runtime.Refreshing and runtime.CarriedByPlayer[snapshot.playerId] ~= nil) end) -- PICKUP_DIAG
             if snapshot.inStolenArea == false and not runtime.Refreshing then
                 local rootId = runtime.CarriedByPlayer[snapshot.playerId]
                 if rootId then AcquireChicken(snapshot.playerId, rootId) end
@@ -964,18 +1171,19 @@ function TheftService:Start(context)
                 or snapshot.operation ~= chicken.operation or not chicken.playerId then return end
             DropPlayerChicken(chicken.playerId, "guardian_caught")
         end)
-        System:RegisterEvent(Events.ON_ELEMENT_TOUCH_PLAYER, runtime.TouchCallback)
         System:RegisterEvent(Events.ON_BEFORE_CHARACTER_TAKE_HURT, runtime.BeforeHurtCallback)
         System:RegisterEvent(Events.ON_CHARACTER_TAKE_FATAL_DAMAGE, runtime.FatalDamageCallback)
         System:RegisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.PreleaveCallback)
         System:BindNotify(context.NetMsg.Messages.PickupBegin, runtime.BeginCallback)
+        System:BindNotify(context.NetMsg.Messages.EggBreakBegin, runtime.EggBreakBeginCallback)
+        System:BindNotify(context.NetMsg.Messages.EggBreakCancel, runtime.EggBreakCancelCallback)
         System:BindNotify(context.NetMsg.Messages.PickupComplete, runtime.CompleteCallback)
         System:BindNotify(context.NetMsg.Messages.PickupCancel, runtime.CancelCallback)
         System:BindNotify(context.NetMsg.Messages.TheftManualDrop, runtime.ManualDropCallback)
         System:BindNotify(context.NetMsg.Messages.TheftCarrySnapshotRequest, runtime.CarrySnapshotCallback)
     else
-        runtime.TouchCallback = nil
         runtime.BeginCallback = nil
+        runtime.EggBreakBeginCallback, runtime.EggBreakCancelCallback = nil, nil
         runtime.CompleteCallback = nil
         runtime.CancelCallback = nil
         runtime.BeforeHurtCallback = nil
@@ -994,11 +1202,10 @@ function TheftService:Start(context)
         self.Ready = false
         self.Refreshing = true
         self.Generating = false
-        for _, chicken in pairs(self.ChickensByRoot) do PauseCountdown(chicken) end
+        for _, chicken in pairs(self.ChickensByRoot) do PauseCountdown(chicken); ClearHatch(chicken) end
         self.ReturnReservations = {}
         self.PointOccupants = {}
-        self.TouchedByPlayer = {}
-        self.HoldByPlayer = {}
+        self.Pickups = {}
         self.CarriedByPlayer = {}
         self.PendingByPlayer = {}
         if config.InteractionEnabled then
@@ -1025,9 +1232,23 @@ function TheftService:Start(context)
         end)
     end
 
+    local function GenerationDiagnostic(stage, current)
+        StartupDiagnostic(stage, {
+            current = function() return context.Services.TheftService == current end,
+            Generation = function() return current.Generation end,
+            Ready = function() return current.Ready end,
+            Generating = function() return current.Generating end,
+            Refreshing = function() return current.Refreshing end,
+            Stopped = function() return current.Stopped end,
+            refreshRoots = function() return current.RefreshRoots ~= nil end,
+        })
+    end
+
     function runtime:GenerateRegions()
+        GenerationDiagnostic("generate_enter", self)
         if self.Stopped or context.Services.TheftService ~= self
             or self.Generating or self.RefreshRoots then
+            GenerationDiagnostic("generate_rejected", self)
             error("偷鸡生成入口已失效")
         end
         self.Generation = self.Generation + 1
@@ -1078,12 +1299,17 @@ function TheftService:Start(context)
         SpawnNextRegion()
         return generation
     end
+    GenerationDiagnostic("startup_timer_register", runtime)
     context.Timers:AddTimer(TheftService.Name,
         GameConfig.Runtime.ServerReadyDelaySeconds, function()
+            GenerationDiagnostic("startup_timer_fire", runtime)
             if runtime.Stopped or context.Services.TheftService ~= runtime then
+                GenerationDiagnostic("startup_timer_skip_stopped_or_replaced", runtime)
                 return end
-            if runtime.Generation == 0 then runtime:GenerateRegions() end
+            if runtime.Generation == 0 then runtime:GenerateRegions()
+            else GenerationDiagnostic("startup_timer_skip_generation_not_zero", runtime) end
         end)
+    GenerationDiagnostic("startup_timer_registered", runtime)
 
 end
 
@@ -1092,7 +1318,9 @@ function TheftService:Stop(context)
     local runtime = context.Services.TheftService
     if not runtime then return end
     runtime.Stopped = true
+    runtime.DynamicChickenDiagnostic = nil -- DYNAMIC_DIAG
     for _, chicken in pairs(runtime.ChickensByRoot) do
+        runtime.ClearHatch(chicken)
         if chicken.countdownTimerId then context.Timers:Remove(chicken.countdownTimerId) end
         chicken.countdownEndMs, chicken.countdownTimerId = nil, nil
     end
@@ -1101,6 +1329,10 @@ function TheftService:Stop(context)
     runtime.SendWorldModels(nil, true)
     if runtime.ModelSnapshotCallback then
         System:UnbindNotify(context.NetMsg.Messages.ChickenModelSnapshotRequest, runtime.ModelSnapshotCallback)
+    end
+    if runtime.EggBreakBeginCallback then
+        System:UnbindNotify(context.NetMsg.Messages.EggBreakBegin, runtime.EggBreakBeginCallback)
+        System:UnbindNotify(context.NetMsg.Messages.EggBreakCancel, runtime.EggBreakCancelCallback)
     end
     if GameConfig.Theft.InteractionEnabled then
         for _, playerId in ipairs(Character:GetAllPlayerIds() or {}) do
@@ -1115,9 +1347,6 @@ function TheftService:Stop(context)
         context.ElementCopy:DestroyTree(rootId)
     end
     runtime.RefreshRoots = nil
-    if runtime.TouchCallback then
-        System:UnregisterEvent(Events.ON_ELEMENT_TOUCH_PLAYER, runtime.TouchCallback)
-    end
     if runtime.BeforeHurtCallback then
         System:UnregisterEvent(Events.ON_BEFORE_CHARACTER_TAKE_HURT, runtime.BeforeHurtCallback)
     end

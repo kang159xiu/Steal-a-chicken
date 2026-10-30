@@ -8,16 +8,9 @@ local HomeService = {
     Dependencies = { "ZoneService" },
 }
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
-local function IsPositiveInteger(value)
-    return type(value) == "number" and value > 0 and value == math.floor(value)
-end
+local IsPositiveInteger = require("Common.Validation").IsPositiveInteger
 
 local function CopyArray(source)
     local result = {}
@@ -66,43 +59,6 @@ local function FindReturnPoint(homeId, config)
     return matches[1]
 end
 
-function HomeService:ValidateConfig(context)
-    if context.Side ~= "Server" then
-        return true
-    end
-    local errors = {}
-    local config = GameConfig.Home
-    if type(config) ~= "table" then
-        errors[#errors + 1] = "GameConfig.Home 必须是 table"
-        return false, errors
-    end
-    if type(config.RootElementIds) ~= "table" or #config.RootElementIds ~= config.MaxPlayers then
-        errors[#errors + 1] = "家园根元件数量必须等于 MaxPlayers"
-    end
-    local seen = {}
-    for index, homeId in ipairs(config.RootElementIds or {}) do
-        if not IsPositiveInteger(homeId) then
-            errors[#errors + 1] = "家园根ID无效，index=" .. tostring(index)
-        elseif seen[homeId] then
-            errors[#errors + 1] = "家园根ID重复: " .. tostring(homeId)
-        else
-            seen[homeId] = true
-        end
-    end
-    if type(config.PurposeProperty) ~= "string" or config.PurposeProperty == "" then
-        errors[#errors + 1] = "PurposeProperty 必须是非空字符串"
-    end
-    if type(config.HomePurpose) ~= "string" or config.HomePurpose == "" then
-        errors[#errors + 1] = "HomePurpose 必须是非空字符串"
-    end
-    if type(config.ReturnPointPurpose) ~= "string" or config.ReturnPointPurpose == "" then
-        errors[#errors + 1] = "ReturnPointPurpose 必须是非空字符串"
-    end
-    if config.MidJoinTeleportDelaySeconds ~= 4 then
-        errors[#errors + 1] = "MidJoinTeleportDelaySeconds 必须为已确认的4秒"
-    end
-    return #errors == 0, errors
-end
 
 function HomeService:Start(context)
     if context.Side ~= "Server" then
@@ -496,7 +452,7 @@ function HomeService:Start(context)
     context.Events:Subscribe(self.Name, "PersistenceReady", function(state)
         local persistence = context.Services.PersistenceService
         if context.Services.HomeService ~= runtime or not persistence or not persistence:IsReady(state.playerId)
-            or persistence:GetState(state.playerId).generation ~= state.generation then return end
+            then return end
         local homeId = runtime:GetPlayerHome(state.playerId)
         if homeId then runtime:RefreshSecondaryBuildings(homeId) end
     end)

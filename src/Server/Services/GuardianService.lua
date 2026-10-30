@@ -8,9 +8,7 @@ local GuardianService = {
     Dependencies = {},
 }
 
-local function IsPositiveInteger(value)
-    return type(value) == "number" and value > 0 and value == math.floor(value)
-end
+local IsPositiveInteger = require("Common.Validation").IsPositiveInteger
 
 local function CopyPosition(value)
     return Engine.Vector(value.X, value.Y, value.Z)
@@ -56,6 +54,66 @@ local function FindUniquePurposeElement(rootId, purpose, debugName)
     return matches[1]
 end
 
+-- 只切换本功能的预警(2)/追踪(1)运动单元；表现失败不阻断玩法，也不重试。
+local function SetGuardianMotion(region, index)
+    local previous = region.MotionIndex
+    if previous == index then return end
+    region.MotionIndex = index
+    local function Apply(motionIndex, enabled)
+        local ok, reason = pcall(function()
+            Element:EnableMotionUnitByIndex(region.GuardianElementId, motionIndex, enabled)
+        end)
+        if not ok then
+            pcall(function()
+                Log:PrintError("[GuardianService] 守护者动作切换失败",
+                    "regionId:", region.Config.RegionId, "guardianId:", region.GuardianElementId,
+                    "motionIndex:", motionIndex, "enabled:", enabled, "reason:", tostring(reason))
+            end)
+        end
+    end
+    if previous then Apply(previous, false) end
+    if index then Apply(index, true) end
+end
+
+local motionCleanupByGuardian = {}
+
+-- 同一区只有一个停止/重置任务；替换任务同时替换后续操作。
+local function StopGuardianMotion(context, region, onReset, cleanup)
+    local previous = region.MotionReset
+    if previous then
+        if previous.cleanup then TimerManager:RemoveTimer(previous.timerId)
+        else context.Timers:Remove(previous.timerId) end
+    end
+    local needsReset = region.MotionIndex ~= nil or previous ~= nil
+    SetGuardianMotion(region, nil)
+    region.MotionReset = nil
+    if not needsReset then
+        if onReset then onReset() end
+        return
+    end
+    local job = { cleanup = cleanup }
+    region.MotionReset = job
+    if cleanup then motionCleanupByGuardian[region.GuardianElementId] = job end
+    local function Reset()
+        if region.MotionReset ~= job then return end
+        if cleanup and motionCleanupByGuardian[region.GuardianElementId] ~= job then
+            return end
+        region.MotionReset = nil
+        if cleanup then motionCleanupByGuardian[region.GuardianElementId] = nil end
+        local ok, reason = pcall(function() Element:ResetElement(region.GuardianElementId) end)
+        if not ok then
+            pcall(function()
+                Log:PrintError("[GuardianService] 守护者动作重置失败",
+                    "guardianId:", region.GuardianElementId, "reason:", tostring(reason))
+            end)
+        end
+        if onReset then onReset() end
+    end
+    -- 模块停止后的清理不属于业务计时器，避免被RemoveOwner/Clear提前移除。
+    if cleanup then job.timerId = TimerManager:AddFrame(2, Reset)
+    else job.timerId = context.Timers:AddFrame(GuardianService.Name, 2, Reset) end
+end
+
 local function BuildImpulse(guardianPosition, playerPosition, horizontalForce, upForce)
     local dx = playerPosition.X - guardianPosition.X
     local dy = playerPosition.Y - guardianPosition.Y
@@ -66,35 +124,6 @@ local function BuildImpulse(guardianPosition, playerPosition, horizontalForce, u
     return Engine.Vector(dx / length * horizontalForce, dy / length * horizontalForce, upForce)
 end
 
-function GuardianService:ValidateConfig(context)
-    if context.Side ~= "Server" then return true end
-    local errors = {}
-    if not IsPositiveInteger(GameConfig.Theft.GuardianPlayerAnchorSourceId) then
-        errors[#errors + 1] = "Theft.GuardianPlayerAnchorSourceId必须是正整数"
-    end
-    local moveSeconds = GameConfig.Theft.GuardianManualMoveSeconds
-    if type(moveSeconds) ~= "number" or moveSeconds ~= moveSeconds
-        or moveSeconds <= 0 or moveSeconds == math.huge then
-        errors[#errors + 1] = "Theft.GuardianManualMoveSeconds必须是有限正数"
-    end
-    if type(GameConfig.Regions) ~= "table" or #GameConfig.Regions ~= 15 then
-        errors[#errors + 1] = "Regions 必须显式包含15个区域"
-    end
-    for index, region in ipairs(GameConfig.Regions or {}) do
-        if region.RegionId ~= index then
-            errors[#errors + 1] = "区域编号必须与数组顺序一致，index=" .. tostring(index)
-        end
-        if region.Enabled then
-            local guardian = region.Guardian
-            if type(guardian) ~= "table" then
-                errors[#errors + 1] = "启用区域缺少 Guardian，region=" .. tostring(index)
-            elseif not IsPositiveInteger(region.RegionRootId) then
-                errors[#errors + 1] = "启用区域缺少 RegionRootId，region=" .. tostring(index)
-            end
-        end
-    end
-    return #errors == 0, errors
-end
 
 function GuardianService:Start(context)
     if context.Side ~= "Server" then return end
@@ -307,6 +336,13 @@ function GuardianService:Start(context)
 
     local function FinishActive(regionRuntime, active, result)
         if not IsActive(regionRuntime, active) then return end
+        if regionRuntime.MotionIndex or regionRuntime.MotionReset then
+            active.state = "MotionResetFinished"
+            StopGuardianMotion(context, regionRuntime, function()
+                if IsActive(regionRuntime, active) then FinishActive(regionRuntime, active, result) end
+            end)
+            return
+        end
         Sample(regionRuntime, active, "returned")
         regionRuntime.Active = nil
         Log:PrintServerLog("[GuardianService] 守护者目标已结束",
@@ -322,6 +358,18 @@ function GuardianService:Start(context)
         if not IsActive(regionRuntime, active)
             or (active.state ~= "Delay" and active.state ~= "Approaching")
             or active.firstTrackingWait then return end
+        if regionRuntime.MotionIndex or regionRuntime.MotionReset then
+            local expectedState, revision = active.state, active.trackingRevision
+            active.state = "MotionResetTracking"
+            StopGuardianMotion(context, regionRuntime, function()
+                if not IsActive(regionRuntime, active) or active.state ~= "MotionResetTracking"
+                    or active.trackingRevision ~= revision then
+                    return end
+                active.state = expectedState
+                BeginTracking(regionRuntime, active)
+            end)
+            return
+        end
         active.delayTimerId = nil
         local revision = active.trackingRevision
         if not regionRuntime.FirstTrackingReady then
@@ -338,7 +386,8 @@ function GuardianService:Start(context)
             active.delayTimerId = context.Timers:AddFrame(GuardianService.Name,
                 GameConfig.Runtime.EngineOperationDelayFrames, function()
                     if not IsActive(regionRuntime, active) or active.state ~= expectedState
-                        or not active.firstTrackingWait or active.trackingRevision ~= revision then return end
+                        or not active.firstTrackingWait or active.trackingRevision ~= revision then
+                        return end
                     active.delayTimerId = nil
                     active.firstTrackingWait = nil
                     regionRuntime.FirstTrackingReady = true
@@ -374,6 +423,7 @@ function GuardianService:Start(context)
         active.movementTargetId = movementTargetId
         active.state = "Tracking"
         local guardianConfig = regionRuntime.Config.Guardian
+        local trackedPlayer = active.playerId and runtime.Players[active.playerId]
         Sample(regionRuntime, active, "before_tracking")
         local request = {
             debugName = "区域" .. tostring(regionRuntime.Config.RegionId)
@@ -381,6 +431,16 @@ function GuardianService:Start(context)
             guardianElementId = regionRuntime.GuardianElementId,
             triggerBoxId = regionRuntime.TriggerBoxId,
             targetElementId = active.rootId,
+            targetPlayerId = active.playerId,
+            canCatch = function()
+                if not IsActive(regionRuntime, active) or active.state ~= "Tracking"
+                    or active.trackingRevision ~= revision then return false end
+                if not trackedPlayer or runtime.Players[active.playerId] ~= trackedPlayer
+                    or runtime.Departed[active.playerId] or not trackedPlayer.ready then return false end
+                local theft = context.Services.TheftService
+                return theft ~= nil and theft:IsCarryingChicken(active.playerId, active.rootId,
+                    active.operation, active.chickenGeneration)
+            end,
             movementTargetId = movementTargetId,
             returnTargetOnCaught = false,
             guardianReturnPosition = regionRuntime.GuardianReturnPosition,
@@ -442,6 +502,9 @@ function GuardianService:Start(context)
             return
         end
         active.hasTracked = true
+        if IsActive(regionRuntime, active) and active.state == "Tracking" then
+            SetGuardianMotion(regionRuntime, 1)
+        end
         ScheduleSample(regionRuntime, active, true, GameConfig.Runtime.EngineOperationDelayFrames, "after_two_frames")
         ScheduleSample(regionRuntime, active, false, 1, "after_one_second")
     end
@@ -455,12 +518,23 @@ function GuardianService:Start(context)
         if active.state == "Tracking" then
             runtime.Tracker:CancelGuardian(regionRuntime.GuardianElementId, "movement_target_changed")
         end
+        StopGuardianMotion(context, regionRuntime)
     end
     local function ContinueTracking(regionRuntime, active)
+        if regionRuntime.MotionReset then
+            active.state = "MotionResetTracking"
+            local revision = active.trackingRevision
+            StopGuardianMotion(context, regionRuntime, function()
+                if IsActive(regionRuntime, active) and active.state == "MotionResetTracking"
+                    and active.trackingRevision == revision then ContinueTracking(regionRuntime, active) end
+            end)
+            return
+        end
         active.state = "Delay"
         local revision = active.trackingRevision
         local delay = math.max(0, (active.readyAtMs - MiscService:GetServerTimestamp()) / 1000)
         if delay == 0 then BeginTracking(regionRuntime, active); return end
+        SetGuardianMotion(regionRuntime, 2)
         active.delayTimerId = context.Timers:AddTimer(GuardianService.Name, delay, function()
             if IsActive(regionRuntime, active) and active.trackingRevision == revision then
                 BeginTracking(regionRuntime, active)
@@ -472,7 +546,7 @@ function GuardianService:Start(context)
             local active = regionRuntime.Active
             if active and active.playerId == player.playerId
                 and (active.state == "Tracking" or active.state == "Delay" or active.state == "AnchorUnavailable"
-                    or active.state == "AnchorPending") then
+                    or active.state == "AnchorPending" or active.state == "MotionResetTracking") then
                 InvalidateTracking(regionRuntime, active)
                 active.state = "AnchorRebinding"
             end
@@ -502,34 +576,33 @@ function GuardianService:Start(context)
         active.delayTimerId = nil
         Sample(regionRuntime, active, "invalidated")
         active.trackingRevision = active.trackingRevision + 1
-        active.state = "ManualReturning"
+        active.state = "MotionResetReturning"
         active.resolution = reason
         active.playerId = nil
         runtime.Tracker:CancelGuardian(regionRuntime.GuardianElementId, reason)
-        local started, failure = runtime.Tracker:MoveGuardian({
-            guardianElementId = regionRuntime.GuardianElementId,
-            position = regionRuntime.GuardianReturnPosition,
-            seconds = GameConfig.Theft.GuardianManualMoveSeconds,
-            reason = reason,
-            onArrived = function(result)
-                if not IsActive(regionRuntime, active) or active.state ~= "ManualReturning" then return end
-                FinishActive(regionRuntime, active, result)
-            end,
-        })
-        if not started then error("主动放下后守护者返程失败: " .. tostring(failure)) end
+        local revision = active.trackingRevision
+        StopGuardianMotion(context, regionRuntime, function()
+            if not IsActive(regionRuntime, active) or active.state ~= "MotionResetReturning"
+                or active.trackingRevision ~= revision then return end
+            active.state = "ManualReturning"
+            local started, failure = runtime.Tracker:MoveGuardian({
+                guardianElementId = regionRuntime.GuardianElementId,
+                position = regionRuntime.GuardianReturnPosition,
+                seconds = GameConfig.Theft.GuardianManualMoveSeconds,
+                reason = reason,
+                onArrived = function(result)
+                    if not IsActive(regionRuntime, active) or active.state ~= "ManualReturning" then return end
+                    FinishActive(regionRuntime, active, result)
+                end,
+            })
+            if not started then error("主动放下后守护者返程失败: " .. tostring(failure)) end
+        end)
     end
 
     StartNext = function(regionRuntime)
         if runtime.Resetting or context.Services.GuardianService ~= runtime then return end
         if regionRuntime.Active or #regionRuntime.Candidates == 0 then return end
-        local selectedIndex = 1
-        for index = 2, #regionRuntime.Candidates do
-            if regionRuntime.Candidates[index].sequence
-                > regionRuntime.Candidates[selectedIndex].sequence then
-                selectedIndex = index
-            end
-        end
-        local active = table.remove(regionRuntime.Candidates, selectedIndex)
+        local active = table.remove(regionRuntime.Candidates)
         regionRuntime.Active = active
         if active.manualRepickup then
             active.state = "Approaching"
@@ -600,7 +673,7 @@ function GuardianService:Start(context)
         if not active or active.rootId ~= snapshot.chickenRootId
             or active.chickenGeneration ~= snapshot.generation then return end
         -- 主动放下后的守护者可能仍在独立返程；不重启、也不取消这次返程。
-        if active.state == "ManualReturning" then
+        if active.state == "ManualReturning" or active.state == "MotionResetReturning" then
             active.rootId = nil
             return
         end
@@ -619,31 +692,42 @@ function GuardianService:Start(context)
         active.resolution = "owned"
         local withoutSession = active.state == "Delay" or active.state == "AnchorRebinding"
             or active.state == "AnchorUnavailable" or active.state == "AnchorPending"
-            or active.state == "TrackingFailed"
+            or active.state == "TrackingFailed" or active.state == "MotionResetTracking"
         if withoutSession and not active.hasTracked then
             if active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
-            regionRuntime.Active = nil
-            StartNext(regionRuntime)
+            active.state = "MotionResetOwned"
+            StopGuardianMotion(context, regionRuntime, function()
+                if not IsActive(regionRuntime, active) or active.state ~= "MotionResetOwned" then return end
+                regionRuntime.Active = nil
+                StartNext(regionRuntime)
+            end)
         elseif active.state == "Tracking" or active.state == "Approaching" or withoutSession then
-            local fromApproach = active.state == "Approaching" or withoutSession
             if active.delayTimerId then context.Timers:Remove(active.delayTimerId); active.delayTimerId = nil end
-            active.state = "ReturningOwned"
-            local stopped, reason = runtime.Tracker:StopAndReturnGuardian(
-                regionRuntime.GuardianElementId,
-                "chicken_owned",
-                fromApproach and {
-                    fromApproach = true,
-                    debugName = "再拾取接近阶段成功带回",
-                    triggerBoxId = regionRuntime.TriggerBoxId,
-                    targetElementId = active.rootId,
-                    guardianReturnPosition = regionRuntime.GuardianReturnPosition,
-                    targetReturnPosition = active.spawnPosition,
-                    onReturned = function(result) FinishActive(regionRuntime, active, result) end,
-                } or nil
-            )
-            if not stopped then
-                error("成功带回后守护者停止复位失败: " .. tostring(reason))
-            end
+            active.state = "MotionResetOwned"
+            active.trackingRevision = active.trackingRevision + 1
+            local revision = active.trackingRevision
+            runtime.Tracker:CancelGuardian(regionRuntime.GuardianElementId, "chicken_owned")
+            StopGuardianMotion(context, regionRuntime, function()
+                if not IsActive(regionRuntime, active) or active.state ~= "MotionResetOwned"
+                    or active.trackingRevision ~= revision then return end
+                active.state = "ReturningOwned"
+                local stopped, reason = runtime.Tracker:StopAndReturnGuardian(
+                    regionRuntime.GuardianElementId,
+                    "chicken_owned",
+                    {
+                        fromApproach = true,
+                        debugName = "成功带回后守护者复位",
+                        triggerBoxId = regionRuntime.TriggerBoxId,
+                        targetElementId = active.rootId,
+                        guardianReturnPosition = regionRuntime.GuardianReturnPosition,
+                        targetReturnPosition = active.spawnPosition,
+                        onReturned = function(result) FinishActive(regionRuntime, active, result) end,
+                    }
+                )
+                if not stopped then
+                    error("成功带回后守护者停止复位失败: " .. tostring(reason))
+                end
+            end)
         end
     end)
 
@@ -652,6 +736,34 @@ function GuardianService:Start(context)
         self.Resetting = true
         self.ResetGeneration = self.ResetGeneration + 1
         local generation = self.ResetGeneration
+        local function BeginReturn()
+            context.Timers:AddFrame(GuardianService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+                if context.Services.GuardianService ~= self or self.ResetGeneration ~= generation then return end
+                for _, regionRuntime in pairs(self.Regions) do
+                    Element:SetPosition(regionRuntime.GuardianElementId,
+                        regionRuntime.GuardianReturnPosition, Element.COORDINATE.World)
+                end
+                context.Timers:AddFrame(GuardianService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+                    if context.Services.GuardianService ~= self or self.ResetGeneration ~= generation then return end
+                    local maxReturnDistance = 0
+                    for _, regionRuntime in pairs(self.Regions) do
+                        local position = Element:GetPosition(regionRuntime.GuardianElementId)
+                        if not position then error("刷新后无法读取守护者位置") end
+                        local expected = regionRuntime.GuardianReturnPosition
+                        local dx, dy, dz = position.X - expected.X,
+                            position.Y - expected.Y, position.Z - expected.Z
+                        maxReturnDistance = math.max(maxReturnDistance, math.sqrt(dx * dx + dy * dy + dz * dz))
+                    end
+                    Log:PrintServerLog("[GuardianService] 刷新复位验证完成",
+                        "maxGuardianDistanceFromReturn:", maxReturnDistance)
+                    self.Resetting = false
+                    onComplete()
+                end)
+            end)
+        end
+        local remaining = 0
+        for _ in pairs(self.Regions) do remaining = remaining + 1 end
+        if remaining == 0 then BeginReturn(); return end
         for _, regionRuntime in pairs(self.Regions) do
             local active = regionRuntime.Active
             runtime.InvalidateDiagnostic(regionRuntime, active)
@@ -659,30 +771,12 @@ function GuardianService:Start(context)
             regionRuntime.Candidates = {}
             if active and active.delayTimerId then context.Timers:Remove(active.delayTimerId) end
             self.Tracker:CancelGuardian(regionRuntime.GuardianElementId, "refresh")
-        end
-        context.Timers:AddFrame(GuardianService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
-            if context.Services.GuardianService ~= self or self.ResetGeneration ~= generation then return end
-            for _, regionRuntime in pairs(self.Regions) do
-                Element:SetPosition(regionRuntime.GuardianElementId,
-                    regionRuntime.GuardianReturnPosition, Element.COORDINATE.World)
-            end
-            context.Timers:AddFrame(GuardianService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+            StopGuardianMotion(context, regionRuntime, function()
                 if context.Services.GuardianService ~= self or self.ResetGeneration ~= generation then return end
-                local maxReturnDistance = 0
-                for _, regionRuntime in pairs(self.Regions) do
-                    local position = Element:GetPosition(regionRuntime.GuardianElementId)
-                    if not position then error("刷新后无法读取守护者位置") end
-                    local expected = regionRuntime.GuardianReturnPosition
-                    local dx, dy, dz = position.X - expected.X,
-                        position.Y - expected.Y, position.Z - expected.Z
-                    maxReturnDistance = math.max(maxReturnDistance, math.sqrt(dx * dx + dy * dy + dz * dz))
-                end
-                Log:PrintServerLog("[GuardianService] 刷新复位验证完成",
-                    "maxGuardianDistanceFromReturn:", maxReturnDistance)
-                self.Resetting = false
-                onComplete()
+                remaining = remaining - 1
+                if remaining == 0 then BeginReturn() end
             end)
-        end)
+        end
     end
 
     context.Timers:AddTimer(GuardianService.Name, GameConfig.Runtime.ServerReadyDelaySeconds, function()
@@ -700,6 +794,11 @@ function GuardianService:Start(context)
                     GameConfig.Theft.GuardianTriggerPurpose,
                     "区域" .. tostring(region.RegionId) .. "守护者捕获触发盒"
                 )
+                local cleanup = motionCleanupByGuardian[guardianId]
+                if cleanup then
+                    TimerManager:RemoveTimer(cleanup.timerId)
+                    motionCleanupByGuardian[guardianId] = nil
+                end
                 local returnPosition = Element:GetPosition(guardianId)
                 if not returnPosition then
                     error("无法读取守护者初始位置，region=" .. tostring(region.RegionId))
@@ -731,7 +830,9 @@ function GuardianService:Stop(context)
     if context.Side ~= "Server" then return end
     local runtime = context.Services.GuardianService
     if not runtime then return end
-    for _, region in pairs(runtime.Regions) do runtime.InvalidateDiagnostic(region, region.Active) end
+    for _, region in pairs(runtime.Regions) do
+        runtime.InvalidateDiagnostic(region, region.Active)
+    end
     Diagnostic.Safe(function() context.Timers:RemoveOwner("GuardianDiagnosticServer") end)
     context.Services.GuardianService = nil
     for _, binding in ipairs(runtime.AnchorBindings) do System:UnregisterEvent(binding[1], binding[2]) end
@@ -748,15 +849,17 @@ function GuardianService:Stop(context)
     if runtime.Tracker then runtime.Tracker:Stop() end
     for _, regionRuntime in pairs(runtime.Regions) do
         local guardianId = regionRuntime.GuardianElementId
-        if IsPositiveInteger(guardianId) and regionRuntime.GuardianReturnPosition then
-            pcall(function()
-                Element:SetPosition(
-                    guardianId,
-                    regionRuntime.GuardianReturnPosition,
-                    Element.COORDINATE.World
-                )
-            end)
-        end
+        StopGuardianMotion(context, regionRuntime, function()
+            if IsPositiveInteger(guardianId) and regionRuntime.GuardianReturnPosition then
+                pcall(function()
+                    Element:SetPosition(
+                        guardianId,
+                        regionRuntime.GuardianReturnPosition,
+                        Element.COORDINATE.World
+                    )
+                end)
+            end
+        end, true)
     end
     runtime.Regions = {}
 end

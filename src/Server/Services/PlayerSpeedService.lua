@@ -4,20 +4,6 @@ local Decimal = require "Common.DecimalInteger"
 local SpeedGrowth = require "Common.SpeedGrowth"
 local PlayerSpeedService = { Name = "PlayerSpeedService", FeatureFlag = "Treadmill", Dependencies = { "EconomyService" } }
 
-function PlayerSpeedService:ValidateConfig()
-    local c = GameConfig.PlayerSpeed
-    if c.DefaultLevel ~= 1 or c.WalkSpeedPerLevel ~= 17 or c.BaseWalkSpeed ~= 500
-        or c.FirstUpgradeExperience ~= "100" or c.ExperienceGrowthPercent ~= 112 or #GameConfig.RebirthLevels ~= 20 then
-        return false, { "PlayerSpeed配置与已确认规则不一致" }
-    end
-    local previous = "0"
-    for count, row in ipairs(GameConfig.RebirthLevels) do
-        if row.Count ~= count or not Decimal.IsValid(row.ExperienceRequired) or Decimal.Compare(row.ExperienceRequired, previous) <= 0
-            or row.Multiplier ~= 1 + count * 0.5 then return false, { "重生门槛/倍率配置无效: " .. count } end
-        previous = row.ExperienceRequired
-    end
-    return true
-end
 
 function PlayerSpeedService:Start(context)
     if context.Side ~= "Server" then return end
@@ -45,6 +31,7 @@ function PlayerSpeedService:Start(context)
         local track = GameConfig.TrackShop.Tracks[state.equippedTrack]
         return { sessionGeneration = state.generation, speedLevel = state.level, experience = state.experience,
             speedUpgradeExperience = state.speedUpgradeExperience,
+            speedUpgradeRequirement = state.speedUpgradeRequirement,
             redeemedMask = state.redeemedMask, rebirthCount = state.rebirthCount, multiplier = 1 + state.rebirthCount * 0.5,
             trainingPurchaseMultiplier = state.trainingPurchaseMultiplier,
             trainingMultiplier = state.trainingPurchaseMultiplier + (track and track.Multiplier or 1) - 1,
@@ -72,8 +59,9 @@ function PlayerSpeedService:Start(context)
         local generation = economy:GetSessionGeneration(id)
         if not generation or not economy:IsCurrent(id, generation) then return nil end
         local state = rt.Players[id]
-        if not state or state.generation ~= generation then
+        if not state then
             state = { generation = generation, level = c.DefaultLevel, experience = "0", speedUpgradeExperience = "0",
+                speedUpgradeRequirement = c.FirstUpgradeExperience,
                 rebirthCount = 0, redeemedMask = 0, trainingPurchaseMultiplier = 1, applyVersion = 0,
                 trackMask = 0, equippedTrack = 0, trackVersion = 0 }
             rt.Players[id] = state
@@ -88,16 +76,16 @@ function PlayerSpeedService:Start(context)
     end
     function rt:AddExperience(id, generation, amount)
         if not CanPlay(id) then return false, "persistence_not_ready" end
-        if not Decimal.IsValid(amount) then return false, "invalid_experience" end
         local state = Ensure(id)
-        if not state or state.generation ~= generation or not Current(id, state) or rt.Dead[id] then
+        if not state or not Current(id, state) or rt.Dead[id] then
             return false, "session_unavailable"
         end
-        state.experience = Decimal.Add(state.experience, amount)
-        state.speedUpgradeExperience = Decimal.Add(state.speedUpgradeExperience, amount)
-        if amount ~= "0" then state.experienceDirty = true end
+        local experience = Decimal.Add(state.experience, amount)
+        local level, remaining, requirement = SpeedGrowth.Advance(state.level,
+            Decimal.Add(state.speedUpgradeExperience, amount), state.speedUpgradeRequirement)
         local previousLevel = state.level
-        state.level, state.speedUpgradeExperience = SpeedGrowth.Advance(state.level, state.speedUpgradeExperience)
+        state.experience, state.level, state.speedUpgradeExperience, state.speedUpgradeRequirement = experience, level, remaining, requirement
+        if amount ~= "0" then state.experienceDirty = true end
         if state.level ~= previousLevel then Apply(id, state) end
         self:FlushExperience(id)
         Publish(id, state)
@@ -106,7 +94,7 @@ function PlayerSpeedService:Start(context)
     -- 倍率派生自同一成长记录，金额不转number；只做本玩法需要的小整数乘法/精确除2。
     function rt:GetExperiencePerTick(id, generation, base)
         local state = Ensure(id)
-        if not state or state.generation ~= generation then return nil, "session_unavailable" end
+        if not state then return nil, "session_unavailable" end
         if not Decimal.IsValid(base) then return nil, "invalid_base_experience" end
         local total = "0"
         for _ = 1, 2 * Snapshot(state).trainingMultiplier do total = Decimal.Add(total, base) end
@@ -122,7 +110,7 @@ function PlayerSpeedService:Start(context)
     function rt:PrepareTrainingMultiplierCommit(id, generation, target)
         if not CanPlay(id) then return nil, "persistence_not_ready" end
         local state = Ensure(id)
-        if not state or state.generation ~= generation or not Current(id, state) or rt.Dead[id] then return nil, "session_unavailable" end
+        if not state or not Current(id, state) or rt.Dead[id] then return nil, "session_unavailable" end
         local allowed, reason = economy:CanPurchaseMultiplier(id, generation)
         if not allowed then return nil, reason end
         local nextProduct = MultiplierProducts.Next("Training", state.trainingPurchaseMultiplier)
@@ -152,7 +140,7 @@ function PlayerSpeedService:Start(context)
     function rt:PrepareTrackCommit(id, generation, expectedVersion, index)
         if not CanPlay(id) then return nil, "persistence_not_ready" end
         local state = Ensure(id)
-        if not state or state.generation ~= generation or not Current(id, state) or rt.Dead[id] then return nil, "session_unavailable" end
+        if not state or not Current(id, state) or rt.Dead[id] then return nil, "session_unavailable" end
         local allowed, reason = economy:CanPurchaseMultiplier(id, generation)
         if not allowed then return nil, reason end
         if state.trackVersion ~= expectedVersion then return nil, "stale_track_state" end
@@ -181,7 +169,7 @@ function PlayerSpeedService:Start(context)
     function rt:CanRebirth(id, generation, expectedCount, paidIndex)
         if not CanPlay(id) then return false, "persistence_not_ready" end
         local state = Ensure(id)
-        if not state or state.generation ~= generation or not Current(id, state) or rt.Dead[id] then return false, "session_unavailable" end
+        if not state or not Current(id, state) or rt.Dead[id] then return false, "session_unavailable" end
         if state.rebirthCount ~= expectedCount then return false, "stale_count" end
         local row = GameConfig.RebirthLevels[expectedCount + 1]
         if not row then return false, "max_rebirth" end
@@ -210,6 +198,7 @@ function PlayerSpeedService:Start(context)
             if paidIndex then state.redeemedMask = state.redeemedMask + 2^(paidIndex-1) end
             state.rebirthCount = expectedCount + 1; state.experience = "0"; state.level = 1
             state.speedUpgradeExperience = "0"
+            state.speedUpgradeRequirement = c.FirstUpgradeExperience
             state.trackMask = 0; state.equippedTrack = 0; state.trackVersion = state.trackVersion + 1
             state.applyVersion = state.applyVersion + 1
             local notified = false
@@ -233,45 +222,34 @@ function PlayerSpeedService:Start(context)
             Export = function(id)
                 local state = rt.Players[id]
                 if not state then return nil, "speed_state_missing" end
-                return { version = 6, trackMask = state.trackMask, equippedTrack = state.equippedTrack,
+                return { version = 7, trackMask = state.trackMask, equippedTrack = state.equippedTrack,
                     trainingPurchaseMultiplier = state.trainingPurchaseMultiplier, redeemedMask = state.redeemedMask, experience = state.experience, speedUpgradeExperience = state.speedUpgradeExperience,
-                    speedLevel = state.level, rebirthCount = state.rebirthCount }
+                    speedUpgradeRequirement = state.speedUpgradeRequirement, speedLevel = state.level, rebirthCount = state.rebirthCount }
             end,
             Restore = function(id, data, done)
                 local experience, upgradeExperience, count, level, mask, purchaseMultiplier = "0", "0", 0, c.DefaultLevel, 0, 1
                 local trackMask, equippedTrack = 0, 0
-                if data then
-                    if data.version ~= 6 or type(data.trackMask) ~= "number" or data.trackMask < 0 or data.trackMask > 511
-                        or data.trackMask ~= math.floor(data.trackMask) or type(data.equippedTrack) ~= "number"
-                        or data.equippedTrack < 0 or data.equippedTrack > 9 or data.equippedTrack ~= math.floor(data.equippedTrack)
-                        or (data.equippedTrack > 0 and math.floor(data.trackMask / 2^(data.equippedTrack-1)) % 2 ~= 1)
-                        or (data.trackMask > 0 and data.equippedTrack == 0) or type(data.trainingPurchaseMultiplier) ~= "number"
-                        or not MultiplierProducts.IsCurrent("Training", data.trainingPurchaseMultiplier)
-                        or data.trainingPurchaseMultiplier ~= math.floor(data.trainingPurchaseMultiplier) or type(data.redeemedMask) ~= "number" or data.redeemedMask < 0 or data.redeemedMask > 1048575
-                        or data.redeemedMask ~= math.floor(data.redeemedMask) or not Decimal.IsValid(data.experience)
-                        or not Decimal.IsValid(data.speedUpgradeExperience)
-                        or type(data.speedLevel) ~= "number" or data.speedLevel < 1 or data.speedLevel >= math.huge
-                        or data.speedLevel ~= math.floor(data.speedLevel)
-                        or type(data.rebirthCount) ~= "number" or data.rebirthCount < 0 or data.rebirthCount > 20 or data.rebirthCount ~= math.floor(data.rebirthCount) then
-                        done(false, "invalid_speed_snapshot"); return
-                    end
-                    local redeemed = 0
-                    for i=1,20 do if math.floor(data.redeemedMask / 2^(i-1)) % 2 == 1 then redeemed = redeemed + 1 end end
-                    if redeemed > data.rebirthCount then done(false, "invalid_paid_rebirth_count"); return end
-                    mask = data.redeemedMask; purchaseMultiplier = data.trainingPurchaseMultiplier
-                    trackMask, equippedTrack = data.trackMask, data.equippedTrack
-                    experience, count = data.experience, data.rebirthCount
-                    upgradeExperience, level = data.speedUpgradeExperience, data.speedLevel
+                local requirement = c.FirstUpgradeExperience
+                if data ~= nil then
+                    if data.version ~= 7 then Log:PrintServerLog("[Persistence] version mismatch", id, "growth", tostring(data.version), 7) end
+                    if data.redeemedMask ~= nil then mask = data.redeemedMask end
+                    if data.trainingPurchaseMultiplier ~= nil then purchaseMultiplier = data.trainingPurchaseMultiplier end
+                    if data.trackMask ~= nil then trackMask = data.trackMask end
+                    if data.equippedTrack ~= nil then equippedTrack = data.equippedTrack end
+                    if data.experience ~= nil then experience = data.experience end
+                    if data.rebirthCount ~= nil then count = data.rebirthCount end
+                    if data.speedUpgradeExperience ~= nil then upgradeExperience = data.speedUpgradeExperience end
+                    if data.speedLevel ~= nil then level = data.speedLevel end
+                    if data.speedUpgradeRequirement ~= nil then requirement = data.speedUpgradeRequirement end
                 end
-                local restoredLevel = level
-                level, upgradeExperience = SpeedGrowth.Advance(level, upgradeExperience)
                 local generation = economy:GetSessionGeneration(id)
                 if not generation then done(false, "economy_session_missing"); return end
                 local synced, reason = economy:SyncRebirthCoinBonus(id, generation, count)
                 if not synced then done(false, reason); return end
                 local state = { generation = generation, level = level, experience = experience,
+                    speedUpgradeRequirement = requirement,
                     speedUpgradeExperience = upgradeExperience, rebirthCount = count, redeemedMask = mask, trainingPurchaseMultiplier = purchaseMultiplier, applyVersion = 0,
-                    trackMask = trackMask, equippedTrack = equippedTrack, trackVersion = 0, experienceDirty = level ~= restoredLevel }
+                    trackMask = trackMask, equippedTrack = equippedTrack, trackVersion = 0 }
                 rt.Players[id], rt.Departed[id] = state, nil
                 done(true, function() Apply(id, state); Publish(id, state); return true end)
             end,

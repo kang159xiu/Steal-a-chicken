@@ -1,4 +1,5 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 local Decimal = require "Common.DecimalInteger"
 local HomeUpgradeController = { Name = "HomeUpgradeController", FeatureFlag = "HomeUpgrade", Dependencies = { "PromptController" } }
 local function Integer(value)
@@ -12,12 +13,7 @@ function HomeUpgradeController:Start(context)
     context.Services.HomeUpgradeController = runtime
     local function Active() return runtime.Active and context.Services.HomeUpgradeController == runtime end
     local function Protect(callback)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function Ui(action, id, callback)
         if runtime.UiFailed[id] then return end
@@ -135,14 +131,14 @@ function HomeUpgradeController:Start(context)
             or message.targetVersion >= math.huge or message.targetVersion ~= math.floor(message.targetVersion)
             or not Integer(message.expectedLevel) or message.expectedLevel > config.MaxLevel
             or not Integer(message.chickenCapacity) or not Integer(message.eggCapacity)
-            or (message.visible and (not Integer(message.homeId) or not Integer(message.sessionGeneration) or not Integer(message.elementId)
+            or (message.visible and (not Integer(message.homeId) or not Integer(message.elementId)
                 or (message.entry ~= "home" and message.entry ~= "placement")
                 or (message.entry == "placement" and not Integer(message.slotIndex))))
             or (message.expectedLevel < config.MaxLevel and (not Decimal.IsValid(message.upgradeCost)
                 or not Integer(message.nextChickenCapacity) or not Integer(message.nextEggCapacity))) then return end
         runtime.Version = message.version
         local previous = runtime.State
-        if not previous or previous.homeId ~= message.homeId or previous.sessionGeneration ~= message.sessionGeneration then
+        if not previous or previous.homeId ~= message.homeId then
             runtime.Pending = {}
         end
         runtime.State = message
@@ -152,10 +148,10 @@ function HomeUpgradeController:Start(context)
         if type(message) ~= "table" then return end
         local request = runtime.Pending[message.requestId]
         local state = runtime.State
-        if not request or not state or message.homeId ~= request.homeId or message.sessionGeneration ~= request.sessionGeneration
+        if not request or not state or message.homeId ~= request.homeId
             or message.targetVersion ~= request.targetVersion or message.expectedLevel ~= request.expectedLevel
             or message.entry ~= request.entry or message.slotIndex ~= request.slotIndex
-            or state.homeId ~= request.homeId or state.sessionGeneration ~= request.sessionGeneration
+            or state.homeId ~= request.homeId
             or type(message.success) ~= "boolean" then return end
         runtime.Pending[message.requestId] = nil
         if message.reason == "insufficient_balance" then
@@ -189,7 +185,7 @@ function HomeUpgradeController:Start(context)
         QueueRender()
         System:SendToServer(messages.HomeUpgradeSnapshotRequest, {})
     end))
-    context.Timers:AddLoopFrame(self.Name, 1, Protect(function()
+    context.Timers:AddLoopTimer(self.Name, 0.1, Protect(function()
         if runtime.Ready and runtime.Landed then ValidateRange() end
     end))
     runtime.Cleanup = function()

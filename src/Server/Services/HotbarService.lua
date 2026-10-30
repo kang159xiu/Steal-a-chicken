@@ -6,57 +6,32 @@ local HotbarService = {
     Dependencies = { "InventoryService", "ZoneService" },
 }
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
-local function IsPositiveInteger(value)
-    return type(value) == "number" and value > 0 and value == math.floor(value)
-end
+local IsPositiveInteger = require("Common.Validation").IsPositiveInteger
 
-local function CopyPosition(value)
-    return Engine.Vector(value.X, value.Y, value.Z)
-end
-
-local function FindEggConfig(eggTypeId)
-    for _, chickenConfig in pairs(GameConfig.ChickenTypes) do
-        local eggConfig = chickenConfig.Egg
-        if eggConfig and eggConfig.EggTypeId == eggTypeId then
-            return eggConfig
-        end
-    end
-    return nil
-end
-
-local function ResolveTemplate(item)
-    if item.kind == "Chicken" then
-        local config = GameConfig.ChickenTypes[item.typeId]
-        return config and config.TemplateRootId or nil
-    end
-    if item.kind == "Egg" then
-        local config = FindEggConfig(item.typeId)
-        return config and config.Enabled and config.TemplateRootId or nil
-    end
-    return nil
-end
-
-function HotbarService:ValidateConfig(context)
-    if context.Side ~= "Server" then return true end
-    local errors = {}
-    local config = GameConfig.Hotbar
-    if type(config) ~= "table" then
-        errors[#errors + 1] = "GameConfig.Hotbar 必须是 table"
-    elseif type(config.DisplayHeight) ~= "number" then
-        errors[#errors + 1] = "Hotbar.DisplayHeight 必须是 number"
-    end
-    return #errors == 0, errors
-end
 
 function HotbarService:Start(context)
     if context.Side ~= "Server" then return end
+
+    local eggConfigsByType = {}
+    for _, chickenConfig in pairs(GameConfig.ChickenTypes) do
+        local eggConfig = chickenConfig.Egg
+        if eggConfig and eggConfig.EggTypeId ~= nil and not eggConfigsByType[eggConfig.EggTypeId] then
+            eggConfigsByType[eggConfig.EggTypeId] = eggConfig
+        end
+    end
+    local function ResolveTemplate(item)
+        if item.kind == "Chicken" then
+            local config = GameConfig.ChickenTypes[item.typeId]
+            return config and config.TemplateRootId or nil
+        end
+        if item.kind == "Egg" then
+            local config = eggConfigsByType[item.typeId]
+            return config and config.Enabled and config.TemplateRootId or nil
+        end
+        return nil
+    end
 
     local inventory = context.Services.InventoryService
     local zone = context.Services.ZoneService
@@ -86,7 +61,7 @@ function HotbarService:Start(context)
     local modelVersion = 0
     local function SendModel(playerId, recipient, cleared)
         local state = runtime.States[playerId]
-        local item = state and state.selectedItemId and inventory:GetItem(playerId, state.selectedItemId)
+        local item = not cleared and state and state.selectedItemId and inventory:GetItem(playerId, state.selectedItemId)
         local models = {}
         if not cleared and state and state.displayRootId and item and item.kind == "Chicken" then
             models[1] = { rootId = state.displayRootId, finalSellPrice = item.finalSellPrice, chickenType = item.typeId }
@@ -142,7 +117,9 @@ function HotbarService:Start(context)
         state.selectedItemId = nil
         state.displayRootId = nil
         state.busy = rootId ~= nil
-        if sendSnapshot ~= false then SendSnapshot(playerId) else SendModel(playerId) end
+        if rootId or sendSnapshot == false then
+            if sendSnapshot ~= false then SendSnapshot(playerId) else SendModel(playerId) end
+        end
 
         local function Complete()
             if state.operation ~= operation then return end
@@ -206,11 +183,10 @@ function HotbarService:Start(context)
 
         state.operation = state.operation + 1
         local operation = state.operation
-        local generation = inventory:GetSessionGeneration(playerId)
         local function Current()
             local latest = inventory:GetItem(playerId, itemId)
             return context.Services.HotbarService == runtime and runtime.States[playerId] == state
-                and state.operation == operation and inventory:GetSessionGeneration(playerId) == generation
+                and state.operation == operation
                 and latest ~= nil and latest.kind == item.kind and latest.typeId == item.typeId
                 and latest.finalSellPrice == item.finalSellPrice
                 and (item.kind ~= "Egg" or (latest.finalScale == item.finalScale
@@ -264,9 +240,12 @@ function HotbarService:Start(context)
                         return
                     end
 
-                    Element:SetEnableCollision(result.rootId, false)
                     if item.kind == "Egg" then
+                        Element:SetEnableCollision(result.rootId, false)
                         Element:SetScale(result.rootId, Engine.Vector(item.finalScale, item.finalScale, item.finalScale))
+                    elseif item.kind == "Chicken" then
+                        local scale = item.finalSellPrice / GameConfig.ChickenTypes[item.typeId].ChickenSellPrice
+                        Element:SetScale(result.rootId, Engine.Vector(scale, scale, scale))
                     end
                     Element:BindingToCharacterOrCreature(
                         result.rootId,
@@ -311,10 +290,13 @@ function HotbarService:Start(context)
     end
 
     function runtime:AdoptExistingDisplay(playerId, itemId, rootId)
-        if not inventory:HasItem(playerId, itemId) or not IsPositiveInteger(rootId) then
+        local item = inventory:GetItem(playerId, itemId)
+        if not item or not IsPositiveInteger(rootId) then
             return false, "invalid_adopt_request"
         end
-        Element:SetEnableCollision(rootId, false)
+        if item.kind == "Egg" then
+            Element:SetEnableCollision(rootId, false)
+        end
         local state = EnsureState(playerId)
         local function Adopt()
             state.operation = state.operation + 1

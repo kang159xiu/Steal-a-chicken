@@ -1,4 +1,5 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 local Decimal = require "Common.DecimalInteger"
 local TrackShopController = { Name = "TrackShopController", FeatureFlag = "TrackShop", Dependencies = { "PromptController" } }
 local function Integer(n) return type(n) == "number" and n >= 0 and n < math.huge and n == math.floor(n) end
@@ -9,16 +10,11 @@ function TrackShopController:Start(context)
         Rows = {}, ByItem = {}, Images = {}, AddedCount = 0 }
     context.Services.TrackShopController = rt
     local function Active() return rt.Active and context.Services.TrackShopController == rt end
-    local function Protect(fn)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() fn((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+    local function Protect(callback)
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function Current(row)
-        return Active() and rt.Ready and rt.State and row.session == rt.Session
+        return Active() and rt.Ready and rt.State
             and rt.Rows[row.index] == row and rt.ByItem[row.itemId] == row
     end
     local function Unbind(row)
@@ -58,7 +54,7 @@ function TrackShopController:Start(context)
     rt.ItemSet = Protect(function(listId, itemId, data)
         if listId ~= c.TileViewId or type(data) ~= "table" then return end
         local row = rt.Rows[data.trackIndex]
-        if not row or data.rowVersion ~= row.version or data.sessionGeneration ~= row.session
+        if not row or data.rowVersion ~= row.version
             or (row.itemId and row.itemId ~= itemId) or (rt.ByItem[itemId] and rt.ByItem[itemId] ~= row) then return end
         Unbind(row)
         row.itemId = itemId; rt.ByItem[itemId] = row
@@ -73,7 +69,7 @@ function TrackShopController:Start(context)
         if listId ~= c.TileViewId or selected ~= true or type(data) ~= "table" then return end
         local row = rt.ByItem[itemId]
         if not row or not Current(row) or not row.landed or data.rowVersion ~= row.version
-            or data.trackIndex ~= row.index or data.sessionGeneration ~= row.session then return end
+            or data.trackIndex ~= row.index then return end
         -- 回调内不写显隐；清除原生选择允许同一行再次点击。
         UI:ClearListViewSelection(listId)
         Request(row)
@@ -110,20 +106,17 @@ function TrackShopController:Start(context)
     end
     rt.StateCallback = Protect(function(_, data)
         if type(data) ~= "table" or not Integer(data.version) or data.version <= rt.Version
-            or not Integer(data.sessionGeneration) or data.sessionGeneration == 0 or data.sessionGeneration < rt.Session
             or not Integer(data.trackVersion) or not Integer(data.trackMask) or data.trackMask > 511
             or not Integer(data.equippedTrack) or data.equippedTrack > 9
             or (data.equippedTrack > 0 and math.floor(data.trackMask / 2^(data.equippedTrack-1)) % 2 ~= 1)
             or (data.trackMask > 0 and data.equippedTrack == 0) then return end
-        if data.sessionGeneration == rt.Session and rt.State and data.trackVersion < rt.State.trackVersion then return end
-        if data.sessionGeneration ~= rt.Session then Reset() end
         rt.Session, rt.Version, rt.State = data.sessionGeneration, data.version, data
         Render()
     end)
     rt.Result = Protect(function(_, data)
         local p = rt.Pending
-        if type(data) ~= "table" or not p or data.requestId ~= p.requestId or data.sessionGeneration ~= p.sessionGeneration
-            or data.trackIndex ~= p.trackIndex or data.trackVersion ~= p.trackVersion or data.sessionGeneration ~= rt.Session
+        if type(data) ~= "table" or not p or data.requestId ~= p.requestId
+            or data.trackIndex ~= p.trackIndex or data.trackVersion ~= p.trackVersion
             or type(data.success) ~= "boolean" then return end
         rt.Pending = nil
         if data.success then

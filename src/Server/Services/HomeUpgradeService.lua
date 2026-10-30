@@ -1,26 +1,9 @@
 local GameConfig = require "Common.Config.GameConfig"
-local Decimal = require "Common.DecimalInteger"
+local SafeCall = require "Common.Core.SafeCall"
 local HomeUpgradeService = { Name = "HomeUpgradeService", FeatureFlag = "HomeUpgrade",
     Dependencies = { "HomeService", "EconomyService" } }
 local function Integer(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
-end
-function HomeUpgradeService:ValidateConfig()
-    local c, levels = GameConfig.HomeUpgrade, GameConfig.HomeLevels
-    if type(c) ~= "table" or c.MaxLevel ~= 20 or c.MaxDistance ~= 300 or type(levels) ~= "table" or #levels ~= 20 then
-        return false, { "HomeUpgrade需要20级及三维300范围" }
-    end
-    if c.InitialUnlockedSlots ~= 5 or c.SlotColorArea ~= 1 or c.UnlockedSlotColor ~= "#BFB6DFFF" or c.LockedSlotColor ~= "#8C8C8CFF" then return false, { "放置位解锁配置不符合已确认规则" } end
-    for _, field in ipairs({ "UiGroupId", "ButtonId", "PriceTextId", "LevelTextId", "ChickenTextId", "EggTextId" }) do
-        if not Integer(c[field]) then return false, { "HomeUpgrade UI配置无效: " .. field } end
-    end
-    for level, row in ipairs(levels) do
-        local expected = level == 1 and "100" or "1" .. string.rep("0", level + 2)
-        if row.Level ~= level or row.ChickenCapacity ~= level + 4 or not Integer(row.EggCapacity)
-            or (level < 20 and (not Decimal.IsValid(row.UpgradeCost) or row.UpgradeCost ~= expected))
-            or (level == 20 and row.UpgradeCost ~= nil) then return false, { "家园等级表不符合已确认数值，level=" .. tostring(level) } end
-    end
-    return true
 end
 function HomeUpgradeService:Start(context)
     if context.Side ~= "Server" then return end
@@ -38,12 +21,7 @@ function HomeUpgradeService:Start(context)
     end
     local function Active() return runtime.Active and context.Services.HomeUpgradeService == runtime end
     local function Protect(callback)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, err = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(err)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     local function InitialSlots()
         local slots = {}
@@ -62,7 +40,7 @@ function HomeUpgradeService:Start(context)
         if not homeId or not home:IsOwner(playerId, homeId) then return nil end
         local generation = economy:GetSessionGeneration(playerId)
         local state = runtime.Players[playerId]
-        if not state or state.homeId ~= homeId or (state.generation ~= nil and state.generation ~= generation) then
+        if not state or state.homeId ~= homeId then
             state = { homeId = homeId, generation = generation, level = 1, unlocked = InitialSlots(), lastRequestId = 0, busy = false }
             runtime.Players[playerId] = state
         elseif state.generation == nil then state.generation = generation end
@@ -145,7 +123,7 @@ function HomeUpgradeService:Start(context)
             validTarget = slot ~= nil and slot.homeId == state.homeId and slot.slotIndex == target.slotIndex
                 and not state.unlocked[target.slotIndex]
         end
-        if not state or not CanPlay(playerId) or runtime.Dead[playerId] or target.generation ~= state.generation or target.homeId ~= state.homeId
+        if not state or not CanPlay(playerId) or runtime.Dead[playerId] or target.homeId ~= state.homeId
             or not economy:IsCurrent(playerId, state.generation) or not validTarget or not InRange(playerId, target) then
             Clear(playerId); return nil
         end
@@ -184,7 +162,7 @@ function HomeUpgradeService:Start(context)
         if not CanPlay(playerId) then return end
         if not runtime.Ready or not Integer(playerId) or type(message) ~= "table"
             or not Integer(message.requestId) or not Integer(message.expectedLevel)
-            or not Integer(message.sessionGeneration) or not Integer(message.homeId) or not Integer(message.targetVersion) then return end
+            or not Integer(message.homeId) or not Integer(message.targetVersion) then return end
         local state, target = Ensure(playerId), Refresh(playerId)
         local function Result(success, reason)
             if not Active() then return end
@@ -193,7 +171,7 @@ function HomeUpgradeService:Start(context)
                 targetVersion = message.targetVersion, expectedLevel = message.expectedLevel, entry = message.entry, slotIndex = message.slotIndex, success = success, reason = reason,
             })
         end
-        if not state or not target or state.homeId ~= message.homeId or state.generation ~= message.sessionGeneration
+        if not state or not target or state.homeId ~= message.homeId
             or target.version ~= message.targetVersion or target.entry ~= message.entry or target.slotIndex ~= message.slotIndex then Result(false, "interaction_expired"); return end
         if state.busy then Result(false, "upgrade_busy"); return end
         if message.requestId <= state.lastRequestId then Result(false, "stale_request"); return end
@@ -274,10 +252,7 @@ function HomeUpgradeService:Start(context)
         DisplayHome(state.homeId, nil)
     end))
     context.Events:Subscribe(self.Name, "EconomyChanged", Protect(function(state)
-        local previous = runtime.Players[state.playerId]
-        local generation = previous and previous.generation
-        local current = Ensure(state.playerId)
-        if current and generation ~= current.generation then Clear(state.playerId); Display(state.playerId) end
+        Ensure(state.playerId)
     end))
     local function InitializeDisplay()
         if not runtime.Ready or not home.UpgradeResourcesReady then return end
@@ -292,7 +267,7 @@ function HomeUpgradeService:Start(context)
         runtime.Ready = true
         InitializeDisplay()
     end))
-    context.Timers:AddLoopFrame(self.Name, 1, Protect(function()
+    context.Timers:AddLoopTimer(self.Name, 0.1, Protect(function()
         if not runtime.Ready then return end
         local ids = {}
         for id in pairs(runtime.Targets) do ids[#ids + 1] = id end
@@ -308,26 +283,12 @@ function HomeUpgradeService:Start(context)
             Restore = function(id, data, done)
                 local level, unlocked = 1, InitialSlots()
                 if data ~= nil then
-                    if data.version ~= 2 then done(false, "home_snapshot_version_incompatible_requires_user_cleanup"); return end
-                    level = data.level
-                    if not Integer(level) or level > config.MaxLevel or type(data.unlockedSlots) ~= "table"
-                        or #data.unlockedSlots ~= level + 4 then done(false, "invalid_home_unlock_snapshot"); return end
-                    unlocked = {}
-                    local validSlots, count = {}, 0
-                    local homeId = home:GetPlayerHome(id)
-                    for _, slot in ipairs(home:GetPlacementSlots(homeId)) do validSlots[slot.slotIndex] = true end
-                    for key, slot in pairs(data.unlockedSlots) do
-                        if not Integer(key) or key > #data.unlockedSlots or not Integer(slot) or not validSlots[slot] or unlocked[slot] then
-                            done(false, "invalid_home_unlock_snapshot"); return
-                        end
-                        unlocked[slot] = true; count = count + 1
+                    if data.version ~= 2 then Log:PrintServerLog("[Persistence] version mismatch", id, "home", tostring(data.version), 2) end
+                    if data.level ~= nil then level = data.level end
+                    if data.unlockedSlots ~= nil then
+                        unlocked = {}
+                        for _, slot in ipairs(data.unlockedSlots) do unlocked[slot] = true end
                     end
-                    if count ~= #data.unlockedSlots then done(false, "invalid_home_unlock_snapshot"); return end
-                    for i = 1, config.InitialUnlockedSlots do if not unlocked[i] then done(false, "missing_initial_unlocked_slot"); return end end
-                else
-                    local validSlots = {}
-                    for _, slot in ipairs(home:GetPlacementSlots(home:GetPlayerHome(id))) do validSlots[slot.slotIndex] = true end
-                    for i = 1, config.InitialUnlockedSlots do if not validSlots[i] then done(false, "initial_placement_slot_missing"); return end end
                 end
                 local state = Ensure(id)
                 if not state then done(false, "home_unavailable"); return end

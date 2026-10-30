@@ -55,7 +55,7 @@ function PurchaseService:Start(context)
         local valid, reason = Current(playerId, generation)
         if not valid then return false, reason, false end
         local state = self.Attempts[playerId]
-        if not state or state.generation ~= generation then
+        if not state then
             state = { generation = generation, lastId = 0 }
             self.Attempts[playerId] = state
         end
@@ -97,11 +97,16 @@ function PurchaseService:Start(context)
         end
         return true, value, true, operationId
     end
+    runtime.Leave = function(playerId) runtime.Attempts[playerId] = nil end
+    System:RegisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.Leave)
+    System:RegisterEvent(Events.ON_PLAYER_RECONNECTED, runtime.Leave)
 end
 function PurchaseService:Stop(context)
     if context.Side ~= "Server" then return end
     local runtime = context.Services.PurchaseService
     if not runtime then return end
+    System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.Leave)
+    System:UnregisterEvent(Events.ON_PLAYER_RECONNECTED, runtime.Leave)
     runtime.Active = false
     runtime.Attempts = {}
     context.Services.PurchaseService = nil

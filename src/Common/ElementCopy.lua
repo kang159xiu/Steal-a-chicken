@@ -8,12 +8,7 @@ local ROOT_MOVE_DELAY_SECONDS = 0.1
 local ROOT_MOVE_DELAY_FRAMES = 2
 local ROOT_MOVE_SETTLE_FRAMES = 2
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
 local function CopyArray(source)
     local result = {}
@@ -40,13 +35,6 @@ local function FormatIds(ids)
         values[#values + 1] = tostring(id)
     end
     return "[" .. table.concat(values, ",") .. "]"
-end
-
-local function FormatPosition(position)
-    if not position then
-        return "nil"
-    end
-    return string.format("(%.3f, %.3f, %.3f)", position.X, position.Y, position.Z)
 end
 
 local function SafeComplete(debugName, onComplete, result)
@@ -186,6 +174,34 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
         RemainingCount = nodeCount,
     }
 
+    -- Only treadmill copies are sampled; diagnostics never own business state.
+    local diagnostic = debugName:sub(1, 10) == "Treadmill:"
+    local requestedAt, callbackSeen, returnedCount = {}, {}, 0
+    local function DiagnosticTime()
+        if not diagnostic then return nil end
+        local ok, value = pcall(function() return MiscService:GetServerTimestamp() end)
+        if ok and type(value) == "number" then return value end
+        return nil
+    end
+    local function Diagnostic(stage, sourceId, copyId, detail)
+        if not diagnostic then return end
+        pcall(function()
+            local now = DiagnosticTime()
+            local elapsed = now and requestedAt[sourceId] and now - requestedAt[sourceId]
+            local node = nodes[sourceId]
+            local pending = stage == "timeout" and FormatIds(SortedKeys(operation.PendingSourceIds)) or "not_sampled"
+            pcall(function()
+                Log:PrintServerLog("[TreadmillCopyDiag]", "stage:", tostring(stage),
+                    "side:", tostring(self._side), "copyId:", tostring(operation.Owner),
+                    "context:", tostring(debugName), "templateId:", tostring(sourceRootId),
+                    "sourceId:", tostring(sourceId), "parentSourceId:", tostring(node and node.ParentSourceId),
+                    "instanceId:", tostring(copyId), "elapsedMs:", tostring(elapsed),
+                    "totalNodes:", tostring(nodeCount), "returnedNodes:", tostring(returnedCount),
+                    "pendingSourceIds:", pending, "detail:", tostring(detail))
+            end)
+        end)
+    end
+
     local function RemoveOutstandingTimeouts()
         local timeoutIds = {}
         for _, timerId in pairs(operation.TimeoutIds) do
@@ -301,6 +317,8 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
 
         local node = nodes[sourceId]
         operation.PendingSourceIds[sourceId] = true
+        if diagnostic then requestedAt[sourceId] = DiagnosticTime() end
+        Diagnostic("request", sourceId, nil)
 
         local timeoutOk, timeoutOrError = xpcall(function()
             return self._timers:AddTimer(operation.Owner, NODE_TIMEOUT_SECONDS, function()
@@ -308,6 +326,7 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
                 if operation.Completed or not operation.PendingSourceIds[sourceId] then
                     return
                 end
+                Diagnostic("timeout", sourceId, nil)
                 FinishFailure(sourceId, "spawn_timeout_3s")
             end)
         end, Traceback)
@@ -320,6 +339,11 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
 
         local spawnOk, spawnError = xpcall(function()
             Element:SpawnElement(Element.SPAWN_SOURCE.Scene, sourceId, function(copyId)
+                if diagnostic and not callbackSeen[sourceId] then
+                    callbackSeen[sourceId] = true
+                    returnedCount = returnedCount + 1
+                end
+                Diagnostic(operation.Completed and "late_callback" or "callback", sourceId, copyId)
                 local callbackOk, callbackError = xpcall(function()
                     if operation.Completed then
                         Log:PrintWarning("[ElementCopy] 操作结束后收到回调，仅记录迟到实例", debugName,
@@ -362,6 +386,7 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
                 end
             end, node.Position, node.Rotation, node.Scale, self._replicate)
         end, Traceback)
+        Diagnostic("call_return", sourceId, nil, spawnOk and "no_exception" or spawnError)
 
         if not spawnOk and not operation.Completed then
             local timeoutId = operation.TimeoutIds[sourceId]

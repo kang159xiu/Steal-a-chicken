@@ -7,12 +7,7 @@ local AvatarReadTest = {
 
 local START_DELAY_SECONDS = 2
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
 function AvatarReadTest:Start(context)
     if context.Side ~= "Client" then

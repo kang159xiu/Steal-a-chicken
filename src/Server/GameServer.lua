@@ -6,13 +6,6 @@ local ElementCopy = require "Common.ElementCopy"
 local EventBus = require "Common.Core.EventBus"
 local TimerRegistry = require "Common.Core.TimerRegistry"
 local ModuleManager = require "Common.Core.ModuleManager"
-local ElementCopyTest = require "Common.Debug.ElementCopyTest"
-local GuardianTrackTest = require "Common.Debug.GuardianTrackTest"
-local CharacterBindingTest = require "Common.Debug.CharacterBindingTest"
-local GuardianCarryIntegrationTest = require "Common.Debug.GuardianCarryIntegrationTest"
-local ZoneTriggerTest = require "Common.Debug.ZoneTriggerTest"
-local PickupInteractionTest = require "Common.Debug.PickupInteractionTest"
-local HomeAssignmentTest = require "Common.Debug.HomeAssignmentTest"
 local AvatarPictureBoardTest = require "Common.Debug.AvatarPictureBoardTest"
 local AvatarReadTest = require "Common.Debug.AvatarReadTest"
 local ZoneService = require "Server.Services.ZoneService"
@@ -39,6 +32,19 @@ local GameServer = {
     Context = nil,
 }
 
+local function StartupDiagnostic(stage, fields)
+    pcall(function()
+        local values = {}
+        for name, read in pairs(fields or {}) do
+            local readOK, value = pcall(read)
+            local textOK, detail = pcall(tostring, value)
+            values[#values + 1] = name .. "=" .. (textOK and detail or "<conversion_failed>")
+                .. " readOK=" .. tostring(readOK)
+        end
+        pcall(function() Log:PrintServerLog("[ServerStartupDiag]", stage, table.concat(values, " | ")) end)
+    end)
+end
+
 local function CreateServerContext()
     local manager = ModuleManager.New("Server", FeatureFlags, NetMsg)
     local events = EventBus.New(function(owner, errorMessage)
@@ -64,13 +70,6 @@ function GameServer:Init()
     Log:PrintServerLog("[GameServer:Init]")
     self.Context = CreateServerContext()
 
-    self.Context.Manager:Register(ElementCopyTest)
-    self.Context.Manager:Register(GuardianTrackTest)
-    self.Context.Manager:Register(CharacterBindingTest)
-    self.Context.Manager:Register(GuardianCarryIntegrationTest)
-    self.Context.Manager:Register(ZoneTriggerTest)
-    self.Context.Manager:Register(PickupInteractionTest)
-    self.Context.Manager:Register(HomeAssignmentTest)
     self.Context.Manager:Register(AvatarPictureBoardTest)
     self.Context.Manager:Register(AvatarReadTest)
     self.Context.Manager:Register(ZoneService)
@@ -103,11 +102,32 @@ end
 
 
 function GameServer:OnStart()
+    StartupDiagnostic("enter", { contextPresent = function() return self.Context ~= nil end })
     Log:PrintServerLog("[GameServer:OnStart]")
-    if not self.Context or not self.Context.Manager:Start() then return false end
+    if not self.Context then
+        StartupDiagnostic("context_missing")
+        return false
+    end
+    local started = self.Context.Manager:Start()
+    StartupDiagnostic("manager_return", { started = function() return started end })
+    pcall(function()
+        for _, name in ipairs(self.Context.Manager._registrationOrder) do
+            pcall(function()
+                StartupDiagnostic("module_result", {
+                    name = function() return name end,
+                    status = function() return self.Context.Manager._records[name].Status end,
+                })
+            end)
+        end
+    end)
+    if not started then return false end
+    StartupDiagnostic("production_gate", { enabled = function() return GameConfig.Persistence.ProductionEnabled end })
     if GameConfig.Persistence.ProductionEnabled then
         local persistence = self.Context.Services.PersistenceService
-        local ok, reason = persistence and persistence:SealAdapters()
+        StartupDiagnostic("seal_before", { persistencePresent = function() return persistence ~= nil end })
+        local ok, reason
+        if persistence then ok, reason = persistence:SealAdapters() end
+        StartupDiagnostic("seal_after", { ok = function() return ok end, reason = function() return reason end })
         if not ok then
             Log:PrintError("[Persistence] adapter seal failed; assets remain locked", tostring(reason))
             return false

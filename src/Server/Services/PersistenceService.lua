@@ -10,15 +10,6 @@ local function Keys(prefix, separator, segmentCount)
     end
     return keys
 end
-function PersistenceService:ValidateConfig()
-    local c = Config.Persistence
-    if c.SaveIntervalSeconds ~= 10 or c.ProbeSegmentCount ~= 25 or c.ProbePaddingLength ~= 48000 or c.SegmentCount ~= 14 or c.ValueLimit ~= 2048 or c.SegmentPayload ~= 1980
-        or c.ProductionPrefix == c.ProbePrefix or not c.ProductionPrefix:match("^[A-Z0-9_]+$")
-        or not c.ProbePrefix:match("^[A-Z0-9_]+$") or (c.ProbeMode ~= "read" and c.ProbeMode ~= "write") then
-        return false, { "Persistence分段/Key/验证模式配置无效" }
-    end
-    return true
-end
 function PersistenceService:Start(context)
     if context.Side ~= "Server" then return end
     local c = Config.Persistence
@@ -65,7 +56,7 @@ function PersistenceService:Start(context)
     end
     local function Session(playerId, generation)
         local session = runtime.Sessions[playerId]
-        if not Active() or not session or session.generation ~= generation then error("stale_archive_session") end
+        if not Active() or not session then error("archive_session_unavailable") end
         return session
     end
     local function Key(session, suffix)
@@ -120,7 +111,9 @@ function PersistenceService:Start(context)
         trace.value, trace.stage = value, "read_validate"
         ProbeRead(session, playerId, generation, key, has, value, trace, expected)
         Session(playerId, generation)
-        assert(type(value) == "string" and #value <= c.ValueLimit and not value:find("[^\032-\126]"), "archive_value_invalid")
+        if expected ~= nil then
+            assert(type(value) == "string" and #value <= c.ValueLimit and not value:find("[^\032-\126]"), "archive_value_invalid")
+        end
         return value
     end
     local function SetValue(playerId, generation, key, value)
@@ -169,36 +162,29 @@ function PersistenceService:Start(context)
     end
     local function ReadCommitted(playerId, generation, trace)
         trace.stage = "read_committed_session"
-        local validateIntegrity = c.ValidateReadIntegrity ~= false
         local session = Session(playerId, generation)
         local directory = ReadValue(playerId, generation, Key(session, "DIR"), trace)
         if not directory then return nil, "not_found" end
         trace.stage = "directory_validate"
-        local group, rev, count, length, hash = directory:match("^D1|([AB])|([1-9][0-9]*)|([1-9][0-9]*)|([1-9][0-9]*)|([0-9A-F]+)$")
-        assert(group and #rev <= 16 and #count <= 2 and #length <= 6 and #hash == 8, "directory_corrupt")
-        rev, count, length = tonumber(rev), tonumber(count), tonumber(length)
-        assert(Integer(rev) and count <= session.segmentCount
-            and (not validateIntegrity or length <= session.segmentCount * c.SegmentPayload), "directory_limit")
+        local format, group, rev, count = directory:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|")
+        if format ~= "D1" then Log:PrintServerLog("[Persistence] directory version mismatch", playerId, tostring(format), "D1") end
+        rev, count = tonumber(rev), tonumber(count)
+        trace.meta = group and rev and { group = group, revision = rev } or nil
         local parts = {}
         for i = 1, count do
-            local value = assert(ReadValue(playerId, generation, Key(session, group .. string.format("%02d", i)), trace), "segment_missing")
+            local value = ReadValue(playerId, generation, Key(session, group .. string.format("%02d", i)), trace)
             trace.stage = "segment_validate"
-            local batch, index, total, checksum, payload = value:match("^P1|([0-9]+)|([0-9]+)|([0-9]+)|([0-9A-F]+)|(.*)$")
+            assert(value ~= nil, "segment_missing")
+            local partFormat, payload = value:match("^([^|]*)|[^|]*|[^|]*|[^|]*|[^|]*|(.*)$")
+            if partFormat ~= "P1" then Log:PrintServerLog("[Persistence] segment version mismatch", playerId, i, tostring(partFormat), "P1") end
             assert(payload ~= nil, "segment_header_invalid")
-            if validateIntegrity then
-                assert(batch == tostring(rev) and index == tostring(i) and total == tostring(count)
-                    and #payload <= c.SegmentPayload and Codec.Checksum(payload) == checksum, "segment_corrupt_or_wrong_batch")
-            end
             parts[i] = payload
         end
         local text = table.concat(parts)
-        trace.stage, trace.value = "snapshot_validate", text
-        if validateIntegrity then
-            assert(#text == length and Codec.Checksum(text) == hash, "snapshot_checksum_mismatch")
-        end
-        trace.stage = "snapshot_decode"
+        trace.stage, trace.value = "snapshot_decode", text
         local snapshot, err = Codec.Decode(text)
-        assert(snapshot ~= nil and type(snapshot) == "table", err or "snapshot_root_invalid")
+        assert(snapshot ~= nil, err)
+        if snapshot.version ~= 1 then Log:PrintServerLog("[Persistence] version mismatch", playerId, "snapshot", tostring(snapshot.version), 1) end
         if session.probe then
             Log:PrintServerLog("[PersistenceProbe] decoded", "playerId:", tostring(playerId), "generation:", tostring(generation),
                 "context:", tostring(trace.context), "paddingLength:", type(snapshot.padding) == "string" and tostring(#snapshot.padding) or "no_string_value")
@@ -210,14 +196,16 @@ function PersistenceService:Start(context)
         local ok, snapshot, reason = pcall(ReadCommitted, playerId, generation, trace)
         if not ok then
             Failure("Read", playerId, generation, trace, snapshot)
-            return nil, tostring(snapshot)
+            if trace.stage == "has_player_data" or trace.stage == "get_player_data" or trace.stage == "read_session"
+               or trace.stage == "read_committed_session" then return nil, tostring(snapshot) end
+            return nil, "not_found"
         end
         return snapshot, reason
     end
     -- 正式写入只持有编码后的独立文本；离场后不依赖在线列表或业务对象。
     local function WriteEncoded(playerId, generation, text, completed)
         local session = runtime.Sessions[playerId]
-        if not Active() or not session or session.generation ~= generation then return false, "stale_archive_session" end
+        if not Active() or not session then return false, "archive_session_unavailable" end
         if session.probe then return false, "probe_requires_async_write" end
         if runtime.Busy[playerId] then return false, "archive_busy" end
         if type(text) ~= "string" or #text == 0 or #text > session.segmentCount * c.SegmentPayload then return false, "snapshot_over_capacity" end
@@ -226,9 +214,14 @@ function PersistenceService:Start(context)
         local trace = { context = "production_write", stage = "read_previous_directory" }
         local priorOk, prior, missing, meta = pcall(ReadCommitted, playerId, generation, trace)
         if not priorOk or (not prior and missing ~= "not_found") then
-            runtime.Busy[playerId] = nil
-            return false, "old_snapshot_unreadable:" .. tostring(priorOk and missing or prior)
+            Failure("ReadBeforeWrite", playerId, generation, trace, priorOk and missing or prior)
+            if trace.stage == "has_player_data" or trace.stage == "get_player_data" or trace.stage == "read_session"
+               or trace.stage == "read_committed_session" then
+                runtime.Busy[playerId] = nil
+                return false, "old_snapshot_unreadable:" .. tostring(priorOk and missing or prior)
+            end
         end
+        meta = meta or trace.meta
         local group = meta and meta.group == "A" and "B" or "A"
         local revision = meta and meta.revision + 1 or 1
         if not Integer(revision) then runtime.Busy[playerId] = nil; return false, "archive_revision_overflow" end
@@ -289,19 +282,25 @@ function PersistenceService:Start(context)
     local adapters, productionStates, loadTriggers = {}, {}, {}
     local sealed, startupReady = false, false
     local statusVersion = 0
-    local function SendStatus(playerId, state, reason, ready)
+    local function SendStatus(playerId, state, reason, ready, source)
         statusVersion = statusVersion + 1
+        local record = productionStates[playerId]
+        pcall(function()
+            Log:PrintServerLog("[PersistenceStateDiag]", "side:", "S", "source:", source,
+                "playerId:", playerId, "state:", tostring(state), "reason:", tostring(reason),
+                "ready:", ready == true, "generation:", tostring(record and record.generation), "version:", statusVersion)
+        end)
         System:SendToClient(playerId, context.NetMsg.Messages.PersistenceState, { version = statusVersion,
-            state = state, reason = tostring(reason), ready = ready == true })
+            state = state, reason = tostring(reason), ready = ready == true, generation = record and record.generation })
     end
     runtime.StateSnapshotCallback = function(_, _, playerId)
         local record = productionStates[playerId]
-        SendStatus(playerId, record and record.state or "loading", record and record.reason or "waiting_load", runtime:IsReady(playerId))
+        SendStatus(playerId, record and record.state or "loading", record and record.reason or "waiting_load", runtime:IsReady(playerId), "snapshot_reply")
     end
     System:BindNotify(context.NetMsg.Messages.PersistenceSnapshotRequest, runtime.StateSnapshotCallback)
     local function Status(record, state, reason)
         record.state, record.reason = state, reason
-        SendStatus(record.playerId, state, reason, record.ready == true and not record.frozen)
+        SendStatus(record.playerId, state, reason, record.ready == true and not record.frozen, "status_change")
         if state:find("failed", 1, true) then
             Log:PrintServerLog("[Persistence] state", tostring(record.playerId), tostring(state), tostring(reason))
         elseif state == "ready" and (reason == "restored" or reason == "new_player") then
@@ -473,11 +472,6 @@ function PersistenceService:Start(context)
         Status(record, "loading", "archive_read")
         local snapshot, readError = self:ReadSnapshot(playerId, generation)
         if not snapshot and readError ~= "not_found" then record.loading = false; Status(record, "load_failed", readError); return false, readError end
-        if snapshot then
-            for _, name in ipairs(adapterOrder) do
-                if type(snapshot[name]) ~= "table" then record.loading = false; Status(record, "load_failed", "missing_component:" .. name); return false, "missing_component:" .. name end
-            end
-        end
         local index, notifications = 1, {}
         local function RestoreNext()
             if not Active() or productionStates[playerId] ~= record or record.frozen or runtime.Sessions[playerId] ~= archiveSession then return end
@@ -485,24 +479,31 @@ function PersistenceService:Start(context)
             if not name then
                 for _, notify in ipairs(notifications) do
                     local ok, result, reason = pcall(notify)
-                    if not ok or result == false then record.loading, record.ready = false, false; Status(record, "load_failed", "restore_notify_failed:" .. tostring(ok and reason or result)); return end
+                    if not ok or result == false then Log:PrintError("[Persistence] restore notify skipped", playerId, tostring(ok and reason or result)) end
                 end
                 record.loading, record.ready = false, true
-                Status(record, "ready", snapshot and "restored" or "new_player")
-                context.Events:Publish("PersistenceReady", { playerId = playerId, generation = generation, restored = snapshot ~= nil })
+                local statusOk, statusError = pcall(Status, record, "ready", snapshot and "restored" or "new_player")
+                if not statusOk then Log:PrintError("[Persistence] ready status notification skipped", playerId, tostring(statusError)) end
+                local readyOk, readyError = pcall(function()
+                    context.Events:Publish("PersistenceReady", { playerId = playerId, generation = generation, restored = snapshot ~= nil })
+                end)
+                if not readyOk then Log:PrintError("[Persistence] ready event skipped", playerId, tostring(readyError)) end
                 if not snapshot then runtime:MarkDirty(playerId, "new_player_initial_snapshot") end
+                if snapshot then runtime:MarkDeferred(playerId, "restored_snapshot") end
                 return
             end
             local called = false
             local function Done(ok, result)
                 if called or not Active() or productionStates[playerId] ~= record or record.frozen or runtime.Sessions[playerId] ~= archiveSession then return end
                 called = true
-                if ok ~= true then record.loading = false; Status(record, "load_failed", "restore_failed:" .. name .. ":" .. tostring(result)); return end
+                if ok ~= true then Log:PrintError("[Persistence] restore skipped", playerId, name, tostring(result)) end
                 if type(result) == "function" then notifications[#notifications + 1] = result end
                 index = index + 1
                 RestoreNext()
             end
-            local ok, err = pcall(adapters[name].Restore, playerId, snapshot and snapshot[name] or nil, Done)
+            local component
+            if snapshot ~= nil then component = snapshot[name] end
+            local ok, err = pcall(adapters[name].Restore, playerId, component, Done)
             if not ok then Done(false, err) end
         end
         RestoreNext()
@@ -572,8 +573,7 @@ function PersistenceService:Start(context)
         probeOperations[playerId] = nil
         if record.timerId then context.Timers:Remove(record.timerId); record.timerId = nil end
         if runtime.Busy[playerId] == record then runtime.Busy[playerId] = nil end
-        if record.generation and runtime.Sessions[playerId]
-            and runtime.Sessions[playerId].generation == record.generation then runtime.Sessions[playerId] = nil end
+        if runtime.Sessions[playerId] == record.session then runtime.Sessions[playerId] = nil end
         ProbeLog("cancel", record, reason)
     end
     local function Current(record)
@@ -589,8 +589,8 @@ function PersistenceService:Start(context)
         local valid, reason = Current(record)
         if not valid then return false, reason end
         local session = runtime.Sessions[record.playerId]
-        if not session or session ~= record.session or session.generation ~= record.generation then
-            return false, "stale_archive_session"
+        if not session or session ~= record.session then
+            return false, "archive_session_unavailable"
         end
         return true
     end

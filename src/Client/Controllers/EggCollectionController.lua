@@ -1,4 +1,5 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 
 local EggCollectionController = { Name = "EggCollectionController", FeatureFlag = "EggCollection", Dependencies = { "PromptController" } }
 local function Integer(value, minimum)
@@ -9,7 +10,7 @@ function EggCollectionController:Start(context)
     if context.Side ~= "Client" then return end
     local config = GameConfig.EggCollection
     local runtime = { Ready = false, Stopped = false, Revision = -1, BlockedVersion = -1,
-        Snapshot = nil, Awaiting = false, Visible = nil }
+        Snapshot = nil, Awaiting = false, Visible = false }
     context.Services.EggCollectionController = runtime
     local function Active() return not runtime.Stopped and context.Services.EggCollectionController == runtime end
     local function Show(visible)
@@ -53,12 +54,7 @@ function EggCollectionController:Start(context)
         return true
     end
     local function Protect(callback)
-        return function(...)
-            if not Active() then return end
-            local args = { n = select("#", ...), ... }
-            local ok, errorMessage = pcall(function() callback((table.unpack or unpack)(args, 1, args.n)) end)
-            if not ok then context.Manager:FailModule(self.Name, tostring(errorMessage)) end
-        end
+        return SafeCall.Protect(Active, function(err) context.Manager:FailModule(self.Name, tostring(err)) end, callback)
     end
     runtime.StateCallback = Protect(function(_, message)
         if type(message) ~= "table" or not Integer(message.revision, 1) or message.revision <= runtime.Revision
@@ -119,7 +115,7 @@ function EggCollectionController:Start(context)
         Render()
         System:SendToServer(context.NetMsg.Messages.EggCollectionSnapshotRequest, {})
     end))
-    context.Timers:AddLoopFrame(self.Name, 1, Protect(function() if runtime.Ready then Render() end end))
+    context.Timers:AddLoopTimer(self.Name, 0.1, Protect(function() if runtime.Ready then Render() end end))
     runtime.Cleanup = function()
         runtime.Stopped = true
         local snapshot = runtime.Snapshot

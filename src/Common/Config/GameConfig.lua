@@ -13,7 +13,6 @@ local GameConfig = {
     Persistence = {
         SaveIntervalSeconds = 10,
         ProductionEnabled = true, -- 发布验证通过、完整接线后才启用。
-        ValidateReadIntegrity = false, -- 临时关闭读取一致性拦截；写入回读确认仍保留。
         ProbeEnabled = false,
         ProbeMode = "write", -- 发布验证先write，下局改read；不自动覆盖旧测试记录。
         ProductionPrefix = "SACSAVE1",
@@ -144,6 +143,9 @@ local GameConfig = {
         FirstUpgradeExperience = "100", ExperienceGrowthPercent = 112,
     },
 
+    ChickenObtained = { GroupId = 107187, ImageId = 107692, TextId = 107186, X = -299, Y = -495,
+        VisibleSeconds = 1, HideSeconds = 1, AnimationIndex = 1 },
+
     Prompt = { TemplateId = 106236, TextId = 106234, X = -180, Y = -430,
         VisibleSeconds = 3, HideSeconds = 1, AnimationIndex = 1 },
 
@@ -266,10 +268,19 @@ local GameConfig = {
 
     Theft = {
         GuardianPlayerAnchorSourceId = 3357,
+        PickupIndicatorSourceId = 6862,
+        RegionProperty = "偷取区域编号",
+        -- 每只独立以 1/分母 概率命中高倍率；未命中固定1倍，不按批次保底。
+        HighMultiplierChanceDenominator = 20,
+        HighMultiplierMin = 2,
+        HighMultiplierMax = 5,
         -- 正式拾取与携带保持开启；刷新由 Refresh.Enabled 单独控制。
         InteractionEnabled = true,
         -- 当前区域全部鸡登记成功后，等待该间隔再生成下一启用区域。
         RegionSpawnIntervalSeconds = 0.1,
+        EggBreakSeconds = 1,
+        HatchGrowthSeconds = 2,
+        HatchInitialScale = 0.1,
         PickupUiGroupId = 100398,
         PickupButtonId = 100397,
         PickupProgressId = 100399,
@@ -277,10 +288,10 @@ local GameConfig = {
         ManualDropButtonId = 104285,
         GuardianManualMoveSeconds = 2,
         ManualDropReturnSeconds = 30,
-        HoldSeconds = 1,
+        HoldSeconds = 0.7,-- 按住拾取所需秒数
         ProgressTickSeconds = 0.02,
         DistanceCheckSeconds = 0.2,
-        MaxHorizontalDistance = 300,
+        MaxHorizontalDistance = 500,-- 拾取三维根距离上限（含高度）
         CarryHeight = 200,
         CharacterSocket = Character.SOCKET_NAME.Root,
         SocketMode = Character.SOCKET_MODE.KeepWorld,
@@ -565,7 +576,7 @@ local GameConfig = {
     -- 1. 从“作用=生成鸡的点”中不重复随机选择 SpawnPointCount 个点，每点生成1只鸡；
     -- 2. 自动查找唯一的“作用=生成守护者的点”；
     -- 3. 再从守护者子孙中自动查找唯一的“作用=判定追踪”触发盒。
-    -- ChickenPool 填该区可出现的鸡编号和权重；权重按总和归一化，不要求合计100。
+    -- ChickenPool/EggPool分别限定本区鸡种与蛋外观，独立按权重抽取；不要求权重合计100。
     Regions = {
         {
             RegionId = 1, Enabled = true, RegionRootId = 223,
@@ -576,6 +587,13 @@ local GameConfig = {
                 { ChickenType = "Chicken3", Weight = 10 },
                 { ChickenType = "Chicken4", Weight = 9 },
                 { ChickenType = "Chicken9", Weight = 1 },
+            },
+            EggPool = {
+                { EggTypeId = "Egg1", Weight = 50 },
+                { EggTypeId = "Egg2", Weight = 30 },
+                { EggTypeId = "Egg3", Weight = 10 },
+                { EggTypeId = "Egg4", Weight = 9 },
+                { EggTypeId = "Egg9", Weight = 1 },
             },
             Guardian = {
                 TrackDelaySeconds = 1,
@@ -597,6 +615,13 @@ local GameConfig = {
                 { ChickenType = "Chicken5", Weight = 9 },
                 { ChickenType = "Chicken10", Weight = 1 },
             },
+            EggPool = {
+                { EggTypeId = "Egg2", Weight = 50 },
+                { EggTypeId = "Egg3", Weight = 30 },
+                { EggTypeId = "Egg4", Weight = 10 },
+                { EggTypeId = "Egg5", Weight = 9 },
+                { EggTypeId = "Egg10", Weight = 1 },
+            },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 600,
                 Acceleration = 150, MaxSpeed = 960, KeepDistance = 0,
                 KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
@@ -609,6 +634,13 @@ local GameConfig = {
                 { ChickenType = "Chicken5", Weight = 10 },
                 { ChickenType = "Chicken6", Weight = 9 },
                 { ChickenType = "Chicken11", Weight = 1 },
+            },
+            EggPool = {
+                { EggTypeId = "Egg3", Weight = 50 },
+                { EggTypeId = "Egg4", Weight = 30 },
+                { EggTypeId = "Egg5", Weight = 10 },
+                { EggTypeId = "Egg6", Weight = 9 },
+                { EggTypeId = "Egg11", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 700,
                 Acceleration = 150, MaxSpeed = 1319, KeepDistance = 0,
@@ -623,6 +655,13 @@ local GameConfig = {
                 { ChickenType = "Chicken7", Weight = 9 },
                 { ChickenType = "Chicken12", Weight = 1 },
             },
+            EggPool = {
+                { EggTypeId = "Egg4", Weight = 50 },
+                { EggTypeId = "Egg5", Weight = 30 },
+                { EggTypeId = "Egg6", Weight = 10 },
+                { EggTypeId = "Egg7", Weight = 9 },
+                { EggTypeId = "Egg12", Weight = 1 },
+            },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 800,
                 Acceleration = 150, MaxSpeed = 1595, KeepDistance = 0,
                 KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
@@ -635,6 +674,13 @@ local GameConfig = {
                 { ChickenType = "Chicken7", Weight = 10 },
                 { ChickenType = "Chicken8", Weight = 9 },
                 { ChickenType = "Chicken13", Weight = 1 },
+            },
+            EggPool = {
+                { EggTypeId = "Egg5", Weight = 50 },
+                { EggTypeId = "Egg6", Weight = 30 },
+                { EggTypeId = "Egg7", Weight = 10 },
+                { EggTypeId = "Egg8", Weight = 9 },
+                { EggTypeId = "Egg13", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 900,
                 Acceleration = 150, MaxSpeed = 1861, KeepDistance = 0,
@@ -649,6 +695,13 @@ local GameConfig = {
                 { ChickenType = "Chicken10", Weight = 9 },
                 { ChickenType = "Chicken15", Weight = 1 },
             },
+            EggPool = {
+                { EggTypeId = "Egg7", Weight = 50 },
+                { EggTypeId = "Egg8", Weight = 30 },
+                { EggTypeId = "Egg9", Weight = 10 },
+                { EggTypeId = "Egg10", Weight = 9 },
+                { EggTypeId = "Egg15", Weight = 1 },
+            },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1000,
                 Acceleration = 150, MaxSpeed = 2063, KeepDistance = 0,
                 KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
@@ -661,6 +714,13 @@ local GameConfig = {
                 { ChickenType = "Chicken11", Weight = 10 },
                 { ChickenType = "Chicken12", Weight = 9 },
                 { ChickenType = "Chicken17", Weight = 1 },
+            },
+            EggPool = {
+                { EggTypeId = "Egg9", Weight = 50 },
+                { EggTypeId = "Egg10", Weight = 30 },
+                { EggTypeId = "Egg11", Weight = 10 },
+                { EggTypeId = "Egg12", Weight = 9 },
+                { EggTypeId = "Egg17", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1100,
                 Acceleration = 150, MaxSpeed = 2247, KeepDistance = 0,
@@ -675,6 +735,13 @@ local GameConfig = {
                 { ChickenType = "Chicken14", Weight = 9 },
                 { ChickenType = "Chicken19", Weight = 1 },
             },
+            EggPool = {
+                { EggTypeId = "Egg11", Weight = 50 },
+                { EggTypeId = "Egg12", Weight = 30 },
+                { EggTypeId = "Egg13", Weight = 10 },
+                { EggTypeId = "Egg14", Weight = 9 },
+                { EggTypeId = "Egg19", Weight = 1 },
+            },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1200,
                 Acceleration = 150, MaxSpeed = 2434, KeepDistance = 0,
                 KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
@@ -687,6 +754,13 @@ local GameConfig = {
                 { ChickenType = "Chicken15", Weight = 10 },
                 { ChickenType = "Chicken16", Weight = 9 },
                 { ChickenType = "Chicken21", Weight = 1 },
+            },
+            EggPool = {
+                { EggTypeId = "Egg13", Weight = 50 },
+                { EggTypeId = "Egg14", Weight = 30 },
+                { EggTypeId = "Egg15", Weight = 10 },
+                { EggTypeId = "Egg16", Weight = 9 },
+                { EggTypeId = "Egg21", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1300,
                 Acceleration = 150, MaxSpeed = 2622, KeepDistance = 0,
@@ -701,6 +775,13 @@ local GameConfig = {
                 { ChickenType = "Chicken18", Weight = 9 },
                 { ChickenType = "Chicken23", Weight = 1 },
             },
+            EggPool = {
+                { EggTypeId = "Egg15", Weight = 50 },
+                { EggTypeId = "Egg16", Weight = 30 },
+                { EggTypeId = "Egg17", Weight = 10 },
+                { EggTypeId = "Egg18", Weight = 9 },
+                { EggTypeId = "Egg23", Weight = 1 },
+            },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1400,
                 Acceleration = 150, MaxSpeed = 2801, KeepDistance = 0,
                 KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
@@ -713,6 +794,13 @@ local GameConfig = {
                 { ChickenType = "Chicken19", Weight = 10 },
                 { ChickenType = "Chicken20", Weight = 9 },
                 { ChickenType = "Chicken24", Weight = 1 },
+            },
+            EggPool = {
+                { EggTypeId = "Egg17", Weight = 50 },
+                { EggTypeId = "Egg18", Weight = 30 },
+                { EggTypeId = "Egg19", Weight = 10 },
+                { EggTypeId = "Egg20", Weight = 9 },
+                { EggTypeId = "Egg24", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1500,
                 Acceleration = 150, MaxSpeed = 2973, KeepDistance = 0,
@@ -727,6 +815,13 @@ local GameConfig = {
                 { ChickenType = "Chicken21", Weight = 9 },
                 { ChickenType = "Chicken25", Weight = 1 },
             },
+            EggPool = {
+                { EggTypeId = "Egg18", Weight = 50 },
+                { EggTypeId = "Egg19", Weight = 30 },
+                { EggTypeId = "Egg20", Weight = 10 },
+                { EggTypeId = "Egg21", Weight = 9 },
+                { EggTypeId = "Egg25", Weight = 1 },
+            },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1600,
                 Acceleration = 150, MaxSpeed = 3125, KeepDistance = 0,
                 KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
@@ -739,6 +834,13 @@ local GameConfig = {
                 { ChickenType = "Chicken22", Weight = 10 },
                 { ChickenType = "Chicken23", Weight = 9 },
                 { ChickenType = "Chicken26", Weight = 1 },
+            },
+            EggPool = {
+                { EggTypeId = "Egg20", Weight = 50 },
+                { EggTypeId = "Egg21", Weight = 30 },
+                { EggTypeId = "Egg22", Weight = 10 },
+                { EggTypeId = "Egg23", Weight = 9 },
+                { EggTypeId = "Egg26", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1700,
                 Acceleration = 150, MaxSpeed = 3254, KeepDistance = 0,
@@ -753,6 +855,13 @@ local GameConfig = {
                 { ChickenType = "Chicken24", Weight = 9 },
                 { ChickenType = "Chicken26", Weight = 1 },
             },
+            EggPool = {
+                { EggTypeId = "Egg21", Weight = 50 },
+                { EggTypeId = "Egg22", Weight = 30 },
+                { EggTypeId = "Egg23", Weight = 10 },
+                { EggTypeId = "Egg24", Weight = 9 },
+                { EggTypeId = "Egg26", Weight = 1 },
+            },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1800,
                 Acceleration = 150, MaxSpeed = 3376, KeepDistance = 0,
                 KnockbackHorizontalForce = 10000, KnockbackUpForce = 1000 }, NeedsConfirmation = false,
@@ -765,6 +874,13 @@ local GameConfig = {
                 { ChickenType = "Chicken24", Weight = 10 },
                 { ChickenType = "Chicken25", Weight = 9 },
                 { ChickenType = "Chicken26", Weight = 1 },
+            },
+            EggPool = {
+                { EggTypeId = "Egg22", Weight = 50 },
+                { EggTypeId = "Egg23", Weight = 30 },
+                { EggTypeId = "Egg24", Weight = 10 },
+                { EggTypeId = "Egg25", Weight = 9 },
+                { EggTypeId = "Egg26", Weight = 1 },
             },
             Guardian = { TrackDelaySeconds = 3, InitialSpeed = 1900,
                 Acceleration = 150, MaxSpeed = 3486, KeepDistance = 0,

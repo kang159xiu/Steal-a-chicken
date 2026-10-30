@@ -1,24 +1,11 @@
 local GameConfig = require "Common.Config.GameConfig"
+local SafeCall = require "Common.Core.SafeCall"
 
 local TheftRefreshService = {
     Name = "TheftRefreshService",
     Dependencies = { "TheftService", "GuardianService", "ZoneService", "HomeService" },
 }
 
-function TheftRefreshService:ValidateConfig(context)
-    local config = GameConfig.Refresh
-    local errors = {}
-    for _, field in ipairs({ "IntervalSeconds", "CountdownSeconds", "CountdownUiId" }) do
-        local value = config[field]
-        if type(value) ~= "number" or value ~= value or value <= 0 or value == math.huge then
-            errors[#errors + 1] = "Refresh." .. field .. " 必须是有限正数"
-        end
-    end
-    if config.RestartIntervalAt ~= "GenerationCompleted" then
-        errors[#errors + 1] = "Refresh.RestartIntervalAt 必须为 GenerationCompleted"
-    end
-    return #errors == 0, errors
-end
 
 function TheftRefreshService:Start(context)
     if context.Side ~= "Server" then return end
@@ -32,11 +19,8 @@ function TheftRefreshService:Start(context)
 
     -- 业务模块执行完成回调时，协调操作的错误仍归刷新模块所有。
     local function Protect(callback)
-        return function(...)
-            if context.Services.TheftRefreshService ~= runtime then return end
-            local ok, errorMessage = pcall(callback, ...)
-            if not ok then context.Manager:FailModule(TheftRefreshService.Name, tostring(errorMessage)) end
-        end
+        return SafeCall.Protect(function() return context.Services.TheftRefreshService == runtime end,
+            function(err) context.Manager:FailModule(TheftRefreshService.Name, tostring(err)) end, callback)
     end
 
     local function IsCurrent(cycle)

@@ -40,8 +40,7 @@ function MultiplierPurchaseController:Start(context)
     rt.StateCallback = function(_, data)
         if not Active() or type(data) ~= "table" or not Integer(data.version) or data.version <= rt.Version then return end
         if data.sessionGeneration ~= nil then
-            if not Integer(data.sessionGeneration) or data.sessionGeneration < rt.Session
-                or not Integer(data.coinMultiplier) or data.coinMultiplier > 4
+            if not Integer(data.coinMultiplier) or data.coinMultiplier > 4
                 or type(data.finalCoinMultiplier) ~= "number" or data.finalCoinMultiplier < data.coinMultiplier
                 or data.finalCoinMultiplier > data.coinMultiplier + 10 or data.finalCoinMultiplier * 2 ~= math.floor(data.finalCoinMultiplier * 2)
                 or not MultiplierProducts.IsCurrent("Training", data.trainingPurchaseMultiplier)
@@ -49,7 +48,7 @@ function MultiplierPurchaseController:Start(context)
                 or data.trainingMultiplier > data.trainingPurchaseMultiplier + 9 or data.trainingMultiplier * 2 ~= math.floor(data.trainingMultiplier * 2) then return end
             rt.Session = data.sessionGeneration
         end
-        if not rt.State or rt.State.sessionGeneration ~= data.sessionGeneration then rt.Pending = {} end
+        if not rt.State then rt.Pending = {} end
         for _, kind in ipairs(kinds) do
             local p = rt.Pending[kind]
             local value = kind == "Coin" and data.coinMultiplier or data.trainingPurchaseMultiplier
@@ -71,8 +70,8 @@ function MultiplierPurchaseController:Start(context)
     rt.Offer = function(_, data)
         if not Active() or type(data) ~= "table" or not config[data.kind] or not rt.State then return end
         local p = rt.Pending[data.kind]
-        if not p or data.requestId ~= p.requestId or data.sessionGeneration ~= p.sessionGeneration
-            or data.expectedMultiplier ~= p.expectedMultiplier or rt.State.sessionGeneration ~= p.sessionGeneration
+        if not p or data.requestId ~= p.requestId
+            or data.expectedMultiplier ~= p.expectedMultiplier
             or Current(data.kind) ~= p.expectedMultiplier then return end
         local row = MultiplierProducts.Next(data.kind, p.expectedMultiplier)
         if not row or data.goodsId ~= row.GoodsId then return end
@@ -86,7 +85,7 @@ function MultiplierPurchaseController:Start(context)
         end end
     end
     rt.Result = function(_, data)
-        if not Active() or type(data) ~= "table" or not config[data.kind] or data.sessionGeneration ~= rt.Session
+        if not Active() or type(data) ~= "table" or not config[data.kind]
             or not Integer(data.receipt) or type(data.success) ~= "boolean" then return end
         if data.success then
             if data.receipt <= rt.Receipt then return end
@@ -95,7 +94,7 @@ function MultiplierPurchaseController:Start(context)
             context.Services.PromptController:Show((data.kind == "Coin" and "金币倍率已提升至x" or "训练内购倍率已提升至x") .. data.target)
         else
             local pending = rt.Pending[data.kind]
-            if pending and data.requestId == pending.requestId and data.sessionGeneration == pending.sessionGeneration
+            if pending and data.requestId == pending.requestId
                 and data.expectedMultiplier == pending.expectedMultiplier then rt.Pending[data.kind] = nil end
             if data.receipt <= rt.Receipt then return end
             rt.Receipt = data.receipt

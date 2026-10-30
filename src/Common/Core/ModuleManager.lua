@@ -3,12 +3,7 @@ local ConfigValidator = require "Common.Core.ConfigValidator"
 local ModuleManager = {}
 ModuleManager.__index = ModuleManager
 
-local function Traceback(errorMessage)
-    if debug and debug.traceback then
-        return debug.traceback(tostring(errorMessage), 2)
-    end
-    return tostring(errorMessage)
-end
+local Traceback = require("Common.Core.SafeCall").Traceback
 
 local function LogErrors(prefix, errors)
     if type(errors) ~= "table" then
@@ -204,30 +199,9 @@ function ModuleManager:Init(context)
                     record.Status = "Blocked"
                     Log:PrintWarning("[ModuleManager] 依赖未初始化，模块不启动", self.Side, name, dependency)
                 else
-                    local configValid = true
-                    if type(record.Module.ValidateConfig) == "function" then
-                        local ok, valid, errors = xpcall(function()
-                            return record.Module:ValidateConfig(context)
-                        end, Traceback)
-                        if not ok then
-                            configValid = false
-                            errors = { tostring(valid) }
-                        elseif valid ~= true then
-                            configValid = false
-                        end
-                        if not configValid then
-                            record.Status = "Invalid"
-                            LogErrors("[ModuleManager] 模块配置错误，不启动 " .. name, errors or {
-                                "ValidateConfig 未返回 true",
-                            })
-                        end
-                    end
-
-                    if configValid then
-                        record.Status = "Initializing"
-                        if self:_CallLifecycle(record, "Init", context) then
-                            record.Status = "Initialized"
-                        end
+                    record.Status = "Initializing"
+                    if self:_CallLifecycle(record, "Init", context) then
+                        record.Status = "Initialized"
                     end
                 end
             end

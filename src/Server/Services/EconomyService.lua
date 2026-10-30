@@ -5,9 +5,6 @@ local EconomyService = { Name = "EconomyService", FeatureFlag = "SellShop", Depe
 local function Integer(value)
     return type(value) == "number" and value >= 0 and value < math.huge and value == math.floor(value)
 end
-function EconomyService:ValidateConfig()
-    return true
-end
 function EconomyService:Start(context)
     if context.Side ~= "Server" then return end
     local runtime = { Active = true, Sessions = {}, Departed = {}, Generation = 0 }
@@ -36,7 +33,7 @@ function EconomyService:Start(context)
     end
     function runtime:IsCurrent(playerId, generation)
         local session = self.Sessions[playerId]
-        return Active() and session ~= nil and session.generation == generation and not self.Departed[playerId]
+        return Active() and session ~= nil and not self.Departed[playerId]
     end
     function runtime:GetBalance(playerId)
         local session = Active() and self.Sessions[playerId] or nil
@@ -48,12 +45,10 @@ function EconomyService:Start(context)
     end
     function runtime:RestoreSnapshot(playerId, generation, snapshot)
         if not self:IsCurrent(playerId, generation) then return false, "session_unavailable" end
-        if type(snapshot) ~= "table" or snapshot.version ~= 2 or not Decimal.IsValid(snapshot.balance)
-            or not Integer(snapshot.coinMultiplier) or snapshot.coinMultiplier < 1 or snapshot.coinMultiplier > 4 then
-            return false, "invalid_economy_snapshot"
-        end
+        if snapshot.version ~= 2 then Log:PrintServerLog("[Persistence] version mismatch", playerId, "economy", tostring(snapshot.version), 2) end
         local session = self.Sessions[playerId]
-        if session.restored or session.balance ~= "0" or session.coinMultiplier ~= 1 then return false, "economy_not_pristine" end
+        if snapshot.balance == nil then snapshot.balance = "0" end
+        if snapshot.coinMultiplier == nil then snapshot.coinMultiplier = 1 end
         session.balance, session.coinMultiplier, session.restored = snapshot.balance, snapshot.coinMultiplier, true
         local notified = false
         return true, function()
@@ -83,7 +78,6 @@ function EconomyService:Start(context)
     -- 正常重生由协调方在同次无等待提交中同步，全部状态提交后沿原通知链刷新。
     function runtime:SyncRebirthCoinBonus(playerId, generation, rebirthCount)
         if not self:IsCurrent(playerId, generation) then return false, "session_unavailable" end
-        if not Integer(rebirthCount) or rebirthCount > 20 then return false, "invalid_rebirth_count" end
         local session = self.Sessions[playerId]
         if session.saleBatch then return false, "sale_batch_busy" end
         session.rebirthCoinHalfUnits = rebirthCount
@@ -241,7 +235,7 @@ function EconomyService:Start(context)
     -- 已提交扣款不因通知失败回滚；调用方不得因通知失败重新扣款。
     function runtime:TryDebit(playerId, generation, amount)
         if not CanMutate(playerId) then return false, "persistence_not_ready" end
-        if not Integer(playerId) or playerId == 0 or not Integer(generation) or generation == 0
+        if not Integer(playerId) or playerId == 0
             or not self:IsCurrent(playerId, generation) then return false, "session_unavailable" end
         if not Decimal.IsValid(amount) then return false, "invalid_debit_amount" end
         local session = self.Sessions[playerId]
