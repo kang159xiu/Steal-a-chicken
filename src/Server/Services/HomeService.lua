@@ -1,6 +1,7 @@
 local GameConfig = require "Common.Config.GameConfig"
 local FeatureFlags = require "Common.Config.FeatureFlags"
 local Decimal = require "Common.DecimalInteger"
+local TreadmillText = require "Common.TreadmillText"
 
 local HomeService = {
     Name = "HomeService",
@@ -106,13 +107,18 @@ function HomeService:Start(context)
         return { homeId = homeId, triggerId = record.triggerId, positionId = record.positionId }
     end
 
-    function runtime:UpdateTreadmillExperienceText(homeId, level)
+    function runtime:UpdateTreadmillExperienceText(homeId, level, amount, nextAmount)
         local record = self.TreadmillResourcesByHome[homeId]
         if context.Services.HomeService ~= self or not self.Ready or not self.TreadmillResourcesReady or not record then return end
         local ids = record.experienceDisplayIds
         if not ids or #ids == 0 then return end
         local ok, text = pcall(function()
-            return "+" .. Decimal.Format(GameConfig.TreadmillLevels[level].ExperiencePerTick) .. "/步"
+            if amount == nil then
+                amount = GameConfig.TreadmillLevels[level].ExperiencePerTick
+                local nextLevel = GameConfig.TreadmillLevels[level + 1]
+                nextAmount = nextLevel and nextLevel.ExperiencePerTick
+            end
+            return TreadmillText.FormatExperience(amount, nextAmount)
         end)
         if not ok then
             Log:PrintError("[Treadmill] 增量文字格式失败，不重试", "homeId:", homeId, "level:", level, tostring(text))

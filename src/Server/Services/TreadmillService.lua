@@ -47,6 +47,14 @@ function TreadmillService:Start(context)
         local ok, result = pcall(function() return context.ElementCopy:DestroyTree(rootId) end)
         if not ok or result ~= true then Log:PrintError("[Treadmill] 运行模型销毁失败，不重试", rootId, tostring(result)) end
     end
+    local function UpdatePreview(id, state, snapshot)
+        snapshot = snapshot or speed:GetSnapshot(id)
+        local level = state and state.level or 1
+        local amount = snapshot and speed:GetExperiencePerTick(id, snapshot.sessionGeneration, rows[level].ExperiencePerTick)
+        local nextAmount = snapshot and rows[level + 1] and speed:GetExperiencePerTick(id, snapshot.sessionGeneration, rows[level + 1].ExperiencePerTick)
+        if state and amount then home:UpdateTreadmillExperienceText(state.homeId, level, amount, nextAmount) end
+        return amount, nextAmount
+    end
     local function Send(id)
         if not Active() or not rt.Ready then return end
         local state = rt.Players[id]
@@ -54,8 +62,8 @@ function TreadmillService:Start(context)
         if state and (rt.Players[id] ~= state or not snapshot) then return end
         rt.Version = rt.Version + 1
         local level = state and state.level or 1
-        local amount = snapshot and speed:GetExperiencePerTick(id, snapshot.sessionGeneration, rows[level].ExperiencePerTick)
-        local nextAmount = snapshot and rows[level + 1] and speed:GetExperiencePerTick(id, snapshot.sessionGeneration, rows[level + 1].ExperiencePerTick)
+        local amount, nextAmount
+        if snapshot then amount, nextAmount = UpdatePreview(id, state, snapshot) end
         System:SendToClient(id, messages.TreadmillState, {
             version = rt.Version, sessionGeneration = state and state.generation or (snapshot and snapshot.sessionGeneration), homeId = state and state.homeId,
             targetVersion = state and state.targetVersion or rt.TargetVersion, triggerId = state and state.triggerId,
@@ -185,7 +193,7 @@ function TreadmillService:Start(context)
                     end
                     if upgrade and persistence then persistence:MarkDirty(id, "treadmill_upgrade") end
                     state.rootId = root; state.operation = nil; state.targetVersion = NextTarget()
-                    home:UpdateTreadmillExperienceText(state.homeId, state.level)
+                    UpdatePreview(id, state)
                     if upgrade then
                         local signOk, signError = pcall(function() System:FireSignEvent("跑步机升级", { id }) end)
                         if not signOk then Log:PrintError("[Treadmill] 升级成功信号发送失败", id, tostring(signError)) end
@@ -228,9 +236,13 @@ function TreadmillService:Start(context)
         state = { homeId = homeId, generation = generation, level = 1, triggerId = resources.triggerId,
             positionId = resources.positionId, targetVersion = NextTarget(), training = false, lastRequestId = 0 }
         rt.Players[id] = state
-        home:UpdateTreadmillExperienceText(homeId, state.level)
+        UpdatePreview(id, state)
         if not rt.Dead[id] then CopyModel(id, state, 1, false) end
         return state
+    end
+    function rt:GetLevel(id)
+        local state = rt.Players[id]
+        return state and state.level or 1
     end
     function rt:CanPurchaseMultiplier(id, generation)
         local state = rt.Players[id]
@@ -273,7 +285,7 @@ function TreadmillService:Start(context)
                 if not ok then Log:PrintError("[Treadmill] 重生提交后成长通知失败", tostring(err)) end
                 Destroy(oldRoot)
                 if Current(id, state) then
-                    home:UpdateTreadmillExperienceText(state.homeId, state.level)
+                    UpdatePreview(id, state)
                     Send(id)
                     context.Events:Publish("TreadmillLevelChanged", { playerId = id, homeId = state.homeId,
                         sessionGeneration = generation, level = 1 })
@@ -417,7 +429,7 @@ function TreadmillService:Start(context)
                     end
                     state.rootId, state.operation = token.rootId, nil
                     token.committed = true
-                    home:UpdateTreadmillExperienceText(state.homeId, state.level)
+                    UpdatePreview(id, state)
                     RestoreDiagnostic("restore_complete", id, state, level)
                     done(true, function() Send(id); return true end)
                 end, true)

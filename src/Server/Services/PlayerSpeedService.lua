@@ -2,7 +2,7 @@ local GameConfig = require "Common.Config.GameConfig"
 local MultiplierProducts = require "Common.MultiplierProducts"
 local Decimal = require "Common.DecimalInteger"
 local SpeedGrowth = require "Common.SpeedGrowth"
-local PlayerSpeedService = { Name = "PlayerSpeedService", FeatureFlag = "Treadmill", Dependencies = { "EconomyService" } }
+local PlayerSpeedService = { Name = "PlayerSpeedService", FeatureFlag = "Treadmill", Dependencies = { "EconomyService", "ZoneService" } }
 
 
 function PlayerSpeedService:Start(context)
@@ -49,7 +49,9 @@ function PlayerSpeedService:Start(context)
         context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
             if not Current(id, state) or rt.Dead[id] or state.applyVersion ~= version then return end
             local ok, err = pcall(function()
-                Character:ChangeAttribute(id, Character.ATTR.MaxWalkSpeed, Snapshot(state).walkSpeed)
+                local speed = c.HomeWalkSpeed
+                if context.Services.ZoneService:IsInStolenArea(id) then speed = Snapshot(state).walkSpeed end
+                Character:ChangeAttribute(id, Character.ATTR.MaxWalkSpeed, speed)
             end)
             if not ok then Log:PrintError("[PlayerSpeed] 速度应用失败", "playerId:", id, "error:", tostring(err)) end
         end)
@@ -289,6 +291,10 @@ function PlayerSpeedService:Start(context)
     for _, binding in ipairs(rt.Bindings) do System:RegisterEvent(binding[1], binding[2]) end
     context.Events:Subscribe(self.Name, "EconomyChanged", function(data)
         if Active() and rt.Ready then Ensure(data.playerId) end
+    end)
+    context.Events:Subscribe(self.Name, "ZoneChanged", function(data)
+        local state = rt.Players[data.playerId]
+        if state and Current(data.playerId, state) then Apply(data.playerId, state) end
     end)
     context.Timers:AddTimer(self.Name, GameConfig.Runtime.ServerReadyDelaySeconds, function()
         if not Active() then return end

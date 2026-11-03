@@ -47,7 +47,7 @@ function ChickenValueController:Start(context)
         context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
             if not Current(record) then return end
             local visited = {}
-            local function Visit(elementId)
+            local function Visit(elementId, worldEgg)
                 if not Current(record) or visited[elementId] then return end
                 visited[elementId] = true
                 local readOk, purpose = pcall(function()
@@ -56,7 +56,16 @@ function ChickenValueController:Start(context)
                 if readOk then pcall(function()
                     if not Current(record) then return end
                     local chicken = GameConfig.ChickenTypes[record.chickenType]
-                    if record.kind == "Egg" then
+                    if worldEgg then
+                        local egg = EggConfig(record.eggTypeId)
+                        if purpose == GameConfig.EggGrowth.ValuePurpose then
+                            FuncElement:SetTextBoardText(elementId, egg.Rarity)
+                            if Current(record) then Element:SetVisibility(elementId, true) end
+                        elseif purpose == GameConfig.EggGrowth.MultiplierPurpose then
+                            FuncElement:SetTextBoardText(elementId, egg.DisplayName)
+                            if Current(record) then Element:SetVisibility(elementId, true) end
+                        end
+                    elseif record.kind == "Egg" then
                         local egg = EggConfig(record.eggTypeId)
                         if purpose == GameConfig.EggGrowth.ValuePurpose then
                             FuncElement:SetTextBoardText(elementId, EggModelText.FormatPrice(record.finalSellPrice))
@@ -68,7 +77,7 @@ function ChickenValueController:Start(context)
                     elseif purpose == config.EggValuePurpose then
                         local text = Decimal.Format(Decimal.FromSafeInteger(chicken.Egg.SellPrice))
                         text = text:gsub("(%.[0-9]-)0+([^0-9]*)$", "%1%2"):gsub("%.([^0-9]*)$", "%1")
-                        FuncElement:SetTextBoardText(elementId, "~" .. text .. "$")
+                        FuncElement:SetTextBoardText(elementId, text .. "$")
                         if Current(record) then Element:SetVisibility(elementId, true) end
                     elseif purpose == config.NamePurpose then
                         FuncElement:SetTextBoardText(elementId, chicken.DisplayName)
@@ -80,10 +89,11 @@ function ChickenValueController:Start(context)
                 end) end
                 if not Current(record) then return end
                 local childOk, children = pcall(function() return Element:GetChildElementsFromElement(elementId) end)
-                if childOk then for _, childId in ipairs(children or {}) do Visit(childId) end
+                if childOk then for _, childId in ipairs(children or {}) do Visit(childId, worldEgg) end
                 end
             end
             Visit(record.rootId)
+            if record.eggRootId then Visit(record.eggRootId, true) end
         end)
     end
     rt.Callback = function(_, message)
@@ -116,7 +126,7 @@ function ChickenValueController:Start(context)
             if message.source == "world" and rt.TransferredRoots[rootId] then
                 nextModels[rootId] = nil
             elseif prior and prior.finalSellPrice == model.finalSellPrice and prior.chickenType == model.chickenType
-                and prior.kind == model.kind and prior.eggTypeId == model.eggTypeId
+                and prior.kind == model.kind and prior.eggTypeId == model.eggTypeId and prior.eggRootId == model.eggRootId
                 and prior.countdownEndMs == model.countdownEndMs and prior.operation == model.operation
                 and prior.generation == model.generation and rt.Roots[rootId] == prior then
                 nextModels[rootId] = prior
@@ -124,6 +134,7 @@ function ChickenValueController:Start(context)
                 if message.source ~= "world" then rt.TransferredRoots[rootId] = true end
                 local record = { rootId = rootId, finalSellPrice = model.finalSellPrice, chickenType = model.chickenType,
                     kind = model.kind, eggTypeId = model.eggTypeId, owner = source,
+                    eggRootId = message.source == "world" and model.eggRootId or nil,
                     countdownEndMs = model.countdownEndMs, operation = model.operation,
                     generation = model.generation, countdownElements = {} }
                 nextModels[rootId], rt.Roots[rootId] = record, record

@@ -13,6 +13,8 @@ local NetMsg = {
     },
 
     Messages = {
+        TutorialState = 1002,
+        TutorialSnapshotRequest = 1003,
         PersistenceState = 1000,
         PersistenceSnapshotRequest = 1001,
         ZoneState = 1110,
@@ -44,6 +46,10 @@ local NetMsg = {
         PlacementCancel = 1322,
         PlacementResult = 1323,
         PlacementSnapshotRequest = 1324,
+        AnimalEquipmentState = 1325,
+        AnimalEquipmentSnapshotRequest = 1326,
+        AnimalEquipmentAction = 1327,
+        AnimalEquipmentResult = 1328,
         ChickenModelState = 1330, -- 世界/已放置/快捷栏模型；world含state/playerId供拾取失效判断，不自动开启UI。
         ChickenModelSnapshotRequest = 1331,
         EggGrowthState = 1400,

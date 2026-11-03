@@ -1,3 +1,4 @@
+local TutorialService = require "Server.Services.TutorialService"
 local GameConfig = require "Common.Config.GameConfig"
 local TheftRefreshService = require "Server.Services.TheftRefreshService"
 local FeatureFlags = require "Common.Config.FeatureFlags"
@@ -91,6 +92,7 @@ function GameServer:Init()
     self.Context.Manager:Register(EggCollectionService)
     self.Context.Manager:Register(GuardianService)
     self.Context.Manager:Register(TheftService)
+    self.Context.Manager:Register(TutorialService)
     if GameConfig.Refresh.Enabled then self.Context.Manager:Register(TheftRefreshService) end
 
     local initialized = self.Context.Manager:Init(self.Context)

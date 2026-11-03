@@ -103,14 +103,16 @@ function SellShopService:Start(context)
         end
         state.batchSync = true
         local results, total, success = {}, "0", true
+        local soldEgg = false
         local ok, err = pcall(function()
             for _, candidate in ipairs(batch) do
                 if not Current(playerId, state) then return end
-                local price
+                local price, itemKind
                 local called, sold, reason = pcall(function()
                     local item = inventory:GetItem(playerId, candidate.itemId)
                     price = economy:GetSalePrice(playerId, item)
                     if not item then return false, "item_not_found" end
+                    itemKind = item.kind
                     if price == nil then return false, "invalid_item_price" end
                     return economy:SettleSale(playerId, state.generation, inventory, item.itemId, price)
                 end)
@@ -120,7 +122,9 @@ function SellShopService:Start(context)
                     sold, reason = false, "sale_exception"
                 end
                 results[#results + 1] = { itemId = candidate.itemId, success = sold, reason = reason, sellPrice = sold and price or nil }
-                if sold then total = Decimal.Add(total, price)
+                if sold then
+                    if itemKind == "Egg" then soldEgg = true end
+                    total = Decimal.Add(total, price)
                 else
                     success = false
                     Log:PrintWarning("[SellShopService] 出售失败", "playerId:", playerId,
@@ -143,6 +147,7 @@ function SellShopService:Start(context)
         Finish(finishEconomy, "balance")
         state.batchSync = nil
         state.busy = false
+        if soldEgg then context.Events:Publish("TutorialEggSold", { playerId = playerId }) end
 
         if finishInventory then
             if Current(playerId, state) then

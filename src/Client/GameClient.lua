@@ -1,3 +1,4 @@
+local TutorialController = require "Client.Controllers.TutorialController"
 local GuardianDiagnosticController = require "Client.Controllers.GuardianDiagnosticController"
 local GameConfig = require "Common.Config.GameConfig"
 local ChickenValueController = require "Client.Controllers.ChickenValueController"
@@ -18,6 +19,7 @@ local PickupController = require "Client.Controllers.PickupController"
 local HotbarController = require "Client.Controllers.HotbarController"
 local SellShopController = require "Client.Controllers.SellShopController"
 local PlacementController = require "Client.Controllers.PlacementController"
+local AnimalEquipmentController = require "Client.Controllers.AnimalEquipmentController"
 local HomeNameController = require "Client.Controllers.HomeNameController"
 local HomeCountController = require "Client.Controllers.HomeCountController"
 local HomeUpgradeController = require "Client.Controllers.HomeUpgradeController"
@@ -70,6 +72,7 @@ function GameClient:Init()
     self.Context.Manager:Register(ChickenValueController)
     self.Context.Manager:Register(SellShopController)
     self.Context.Manager:Register(PlacementController)
+    self.Context.Manager:Register(AnimalEquipmentController)
     self.Context.Manager:Register(HomeNameController)
     self.Context.Manager:Register(HomeCountController)
     self.Context.Manager:Register(HomeUpgradeController)
@@ -80,6 +83,7 @@ function GameClient:Init()
     self.Context.Manager:Register(EggGrowthController)
     self.Context.Manager:Register(EggCollectionController)
     self.Context.Manager:Register(EggCollectionListController)
+    self.Context.Manager:Register(TutorialController)
     if GameConfig.Refresh.Enabled then self.Context.Manager:Register(RefreshController) end
 
     local initialized = self.Context.Manager:Init(self.Context)

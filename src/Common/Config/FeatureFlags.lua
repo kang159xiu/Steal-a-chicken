@@ -2,6 +2,7 @@
 -- 正式模块完成接线后按本表启用；临时 API 测试模块保持关闭。
 local FeatureFlags = {
     Names = {
+        "Tutorial",
         "GuideLineTest",
         "AvatarPictureBoardTest",
         "AvatarReadTest",
@@ -27,6 +28,7 @@ local FeatureFlags = {
 
     -- 仅用于避免共享开关在不需要该功能的端产生“未登记模块”警告。
     Scopes = {
+        Tutorial = { Server = true, Client = true },
         GuideLineTest = { Server = false, Client = true },
         Persistence = { Server = true, Client = true },
         Zone = { Server = true, Client = false },
@@ -49,6 +51,7 @@ local FeatureFlags = {
     },
 
     Values = {
+        Tutorial = true,
         GuideLineTest = false,
         -- 固定图标显示器头像测试暂时关闭，避免影响单独读取头像的结果。
         AvatarPictureBoardTest = false,

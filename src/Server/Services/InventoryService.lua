@@ -233,7 +233,7 @@ function InventoryService:Start(context)
                     if row[5] == nil then row[5] = egg.SellPrice end
                     if row[6] == nil then row[6] = GameConfig.EggGrowth.InitialScaleUnits end
                     if row[7] == nil then row[7] = row[5] end
-                    item.displayName, item.iconIndex = typeId, egg.IconIndex
+                    item.displayName, item.iconIndex = egg.DisplayName, egg.IconIndex
                     item.sourceEggId, item.baseSellPrice, item.finalScaleUnits = row[4], row[5], row[6]
                     item.finalScale, item.finalSellPrice = row[6] / 100, row[7]
                     data.Eggs[itemId] = item; data.EggOrder[#data.EggOrder + 1] = itemId
@@ -379,7 +379,7 @@ function InventoryService:Start(context)
             itemId = itemId,
             kind = "Egg",
             typeId = eggRecord.eggTypeId,
-            displayName = eggRecord.eggTypeId,
+            displayName = eggConfig.DisplayName,
             count = 1,
             iconIndex = eggConfig.IconIndex,
             sequence = self.GlobalSequence,

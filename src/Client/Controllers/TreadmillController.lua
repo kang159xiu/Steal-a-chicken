@@ -1,6 +1,7 @@
 local GameConfig = require "Common.Config.GameConfig"
 local SafeCall = require "Common.Core.SafeCall"
 local Decimal = require "Common.DecimalInteger"
+local TreadmillText = require "Common.TreadmillText"
 local TreadmillController = { Name = "TreadmillController", FeatureFlag = "Treadmill", Dependencies = { "PromptController" } }
 local function Integer(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
@@ -140,8 +141,7 @@ function TreadmillController:Start(context)
             Ui(c.LevelTextId, function() UI:SetText({ c.LevelTextId }, text, false) end)
             Ui(c.PriceTextId, function() UI:SetText({ c.PriceTextId }, maximum and "最高等级" or Decimal.Format(state.upgradeCost), false) end)
             Ui(c.ExperiencePreviewTextId, function()
-                local preview = "+" .. Decimal.Format(current.experiencePerTick) .. "/次"
-                if not maximum then preview = preview .. "->+" .. Decimal.Format(current.nextExperiencePerTick) .. "/次" end
+                local preview = TreadmillText.FormatExperience(current.experiencePerTick, not maximum and current.nextExperiencePerTick or nil)
                 UI:SetText({ c.ExperiencePreviewTextId }, preview, false)
             end)
             rt.Landed = true; Show(true)

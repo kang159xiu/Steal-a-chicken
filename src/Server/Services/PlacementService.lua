@@ -41,7 +41,7 @@ function PlacementService:Start(context)
     local inventory = context.Services.InventoryService
     local hotbar = context.Services.HotbarService
     local runtime = { Ready = false, Stopped = false, Targets = {}, Homes = {}, Pending = {}, Sequence = 0,
-        Revision = 0, Committing = false, PositionReadFailures = {} }
+        Revision = 0, Committing = false, PositionReadFailures = {}, PanelJobs = {}, PanelVersions = {} }
     context.Services.PlacementService = runtime
 
     local persistence = context.Services.PersistenceService
@@ -55,6 +55,7 @@ function PlacementService:Start(context)
     local function Active()
         return not runtime.Stopped and context.Services.PlacementService == runtime
     end
+    local CancelPanel
 
     function runtime:GetPlacedSnapshot(playerId)
         local homeId = home:GetPlayerHome(playerId)
@@ -164,7 +165,7 @@ function PlacementService:Start(context)
             selectedItemId = target and target.selectedItemId or nil,
             canPlace = target ~= nil and target.selectedItemId ~= nil,
             canRecall = target ~= nil and Occupant(target) ~= nil,
-            busy = target ~= nil and target.operation ~= nil,
+            busy = runtime.PanelJobs[playerId] ~= nil or (target ~= nil and target.operation ~= nil),
         }
 
         System:SendToClient(playerId, context.NetMsg.Messages.PlacementState, message)
@@ -210,6 +211,7 @@ function PlacementService:Start(context)
     end
 
     local function ClearHome(playerId, homeId)
+        if CancelPanel then CancelPanel(playerId, "home_released") end
         ClearTarget(playerId)
         local house = runtime.Homes[homeId]
         if not house or house.playerId ~= playerId then return end
@@ -299,6 +301,7 @@ function PlacementService:Start(context)
     end
 
     runtime.TouchCallback = Protect(function(elementId, playerId)
+        if runtime.PanelJobs[playerId] then return end
         if not CanPlay(playerId) or not runtime.Ready or not IsPositiveInteger(playerId) then
             return
         end
@@ -334,6 +337,10 @@ function PlacementService:Start(context)
     end)
 
     runtime.ActionCallback = Protect(function(_, message, playerId)
+        if runtime.PanelJobs[playerId] then
+            SendState(playerId)
+            return
+        end
         if not CanPlay(playerId) then return end
         if not runtime.Ready or not IsPositiveInteger(playerId) or type(message) ~= "table"
             or not IsPositiveInteger(message.version) or not IsPositiveInteger(message.elementId)
@@ -417,6 +424,266 @@ function PlacementService:Start(context)
             end)
     end)
 
+    -- 面板入口与近身交互共用同一份家园记录；面板无需手持或碰撞目标。
+    local function PanelItems(playerId)
+        local items = {}
+        for _, item in ipairs(inventory:GetSnapshot(playerId)) do
+            if item.kind == "Chicken" then
+                items[#items + 1] = { itemId = item.itemId, typeId = item.typeId,
+                    finalSellPrice = item.finalSellPrice, equipped = false }
+            end
+        end
+        local placed = runtime:GetPlacedSnapshot(playerId)
+        for _, slot in ipairs(placed and placed.slots or {}) do
+            local item = slot.chicken
+            items[#items + 1] = { itemId = item.itemId, typeId = item.typeId,
+                finalSellPrice = item.finalSellPrice, equipped = true, slotIndex = slot.slotIndex }
+        end
+        table.sort(items, function(a, b)
+            if a.finalSellPrice ~= b.finalSellPrice then return a.finalSellPrice > b.finalSellPrice end
+            return a.itemId < b.itemId
+        end)
+        return items
+    end
+    local function SendPanel(playerId)
+        if not Active() or not runtime.Ready then
+            return
+        end
+        local job = runtime.PanelJobs[playerId]
+        local version = (runtime.PanelVersions[playerId] or 0) + 1
+        runtime.PanelVersions[playerId] = version
+        local message = {
+            version = version, homeId = home:GetPlayerHome(playerId), busy = job ~= nil,
+            items = job and job.initialItems or PanelItems(playerId),
+        }
+        System:SendToClient(playerId, context.NetMsg.Messages.AnimalEquipmentState, message)
+    end
+    local function FinishPanel(job, cancelled)
+        if runtime.PanelJobs[job.playerId] ~= job then
+            return
+        end
+        job.cancelled = cancelled
+        if job.rootId then DestroyRoot(job.rootId, "panel_cancelled"); job.rootId = nil end
+        for _, prepared in ipairs(job.prepared) do
+            if prepared.rootId then DestroyRoot(prepared.rootId, "panel_uncommitted"); prepared.rootId = nil end
+        end
+        -- 批次结束时仍持有面板锁，避免自身库存通知重复刷新列表。
+        job.endBatch()
+        if job.changed and runtime.Homes[job.homeId] == job.house then
+            PublishPlaced(job.playerId, job.homeId)
+        end
+        runtime.PanelJobs[job.playerId] = nil
+        if not Active() then return end
+        RefreshTarget(job.playerId)
+        SendState(job.playerId)
+        SendPanel(job.playerId)
+        System:SendToClient(job.playerId, context.NetMsg.Messages.AnimalEquipmentResult, {
+            requestId = job.requestId, success = not cancelled and job.failures == 0,
+            reason = cancelled or (job.failures > 0 and "partial_failure" or "completed"),
+            changed = job.changed == true, failures = job.failures,
+        })
+    end
+    CancelPanel = function(playerId, reason)
+        local job = runtime.PanelJobs[playerId]
+        if job then FinishPanel(job, reason) end
+    end
+    local function PanelCurrent(job)
+        return Active() and runtime.PanelJobs[job.playerId] == job and not job.cancelled
+            and CanPlay(job.playerId) and home:GetPlayerHome(job.playerId) == job.homeId
+            and runtime.Homes[job.homeId] == job.house
+    end
+    runtime.PanelSnapshotCallback = Protect(function(_, _, playerId) SendPanel(playerId) end)
+    runtime.PanelActionCallback = Protect(function(_, message, playerId)
+        if type(message) ~= "table" or not IsPositiveInteger(playerId)
+            or not IsPositiveInteger(message.requestId) or not IsPositiveInteger(message.version)
+            or (message.action ~= "best" and message.action ~= "equip" and message.action ~= "unequip")
+            or (message.action ~= "best" and type(message.itemId) ~= "string") then
+            return
+        end
+        local function Reject(reason)
+            SendPanel(playerId)
+            System:SendToClient(playerId, context.NetMsg.Messages.AnimalEquipmentResult, {
+                requestId = message.requestId, success = false, reason = reason,
+            })
+        end
+        local target = runtime.Targets[playerId]
+        if not runtime.Ready or not CanPlay(playerId) then Reject("not_ready"); return end
+        if runtime.PanelJobs[playerId] or (target and target.operation) then Reject("operation_busy"); return end
+        local homeId = home:GetPlayerHome(playerId)
+        if not homeId or message.homeId ~= homeId or message.version ~= runtime.PanelVersions[playerId] then
+            Reject("interaction_expired"); return
+        end
+        local house = runtime.Homes[homeId]
+        if not house then
+            house = { playerId = playerId, slots = {}, count = 0 }
+            runtime.Homes[homeId] = house
+        end
+        if house.playerId ~= playerId then Reject("home_unavailable"); return end
+        local slots, byIndex = {}, {}
+        for _, slot in ipairs(home:GetPlacementSlots(homeId)) do
+            if SlotUnlocked(playerId, slot.slotIndex) then
+                slots[#slots + 1] = slot
+                byIndex[slot.slotIndex] = slot
+            end
+        end
+        local items, tasks = PanelItems(playerId), {}
+        if message.action == "best" then
+            local ranking = {}
+            for _, item in ipairs(items) do ranking[#ranking + 1] = item end
+            table.sort(ranking, function(a, b)
+                if a.finalSellPrice ~= b.finalSellPrice then return a.finalSellPrice > b.finalSellPrice end
+                if a.equipped ~= b.equipped then return a.equipped end
+                return a.itemId < b.itemId
+            end)
+            local wanted, incoming = {}, {}
+            for i = 1, math.min(ChickenCapacity(playerId), #slots, #ranking) do
+                local item = ranking[i]; wanted[item.itemId] = true
+                if not item.equipped then incoming[#incoming + 1] = item end
+            end
+            local destinations = {}
+            -- 先替换未入选的鸡，再填空位；副本失败时该位原鸡仍保留。
+            for _, slot in ipairs(slots) do
+                local previous = house.slots[slot.slotIndex]
+                if previous and not wanted[previous.chicken.itemId] then destinations[#destinations + 1] = slot end
+            end
+            for _, slot in ipairs(slots) do
+                if not house.slots[slot.slotIndex] then destinations[#destinations + 1] = slot end
+            end
+            for i, item in ipairs(incoming) do
+                if destinations[i] then tasks[#tasks + 1] = { slot = destinations[i], item = item } end
+            end
+        else
+            local selected
+            for _, item in ipairs(items) do if item.itemId == message.itemId then selected = item; break end end
+            if not selected or selected.equipped ~= (message.action == "unequip") then Reject("item_changed"); return end
+            if selected.equipped then
+                local slot = byIndex[selected.slotIndex]
+                if not slot then Reject("slot_locked"); return end
+                tasks[1] = { slot = slot, recall = true }
+            else
+                local destination
+                if house.count < ChickenCapacity(playerId) then
+                    for _, slot in ipairs(slots) do if not house.slots[slot.slotIndex] then destination = slot; break end end
+                end
+                if not destination then
+                    for _, slot in ipairs(slots) do
+                        local previous = house.slots[slot.slotIndex]
+                        if previous and (not destination or previous.chicken.finalSellPrice < house.slots[destination.slotIndex].chicken.finalSellPrice) then
+                            destination = slot
+                        end
+                    end
+                end
+                if not destination then Reject("capacity_full"); return end
+                tasks[1] = { slot = destination, item = selected }
+            end
+        end
+        local endBatch, reason = inventory:BeginChangeBatch(playerId)
+        if not endBatch then Reject(reason); return end
+        local job = { playerId = playerId, homeId = homeId, house = house, requestId = message.requestId,
+            initialItems = items, endBatch = endBatch, failures = 0, prepared = {} }
+        runtime.PanelJobs[playerId] = job
+        SendState(playerId)
+        SendPanel(playerId)
+        local index = 0
+        local function Next()
+            if not PanelCurrent(job) then FinishPanel(job, "interaction_expired"); return end
+            index = index + 1
+            local task = tasks[index]
+            if not task then
+                -- 复制等待期间不改资产；所有可提交项在同一段Lua执行中完成交换。
+                local replaced = {}
+                for _, prepared in ipairs(job.prepared) do
+                    local item, slot, previous = prepared.item, prepared.slot, prepared.previous
+                    local current = inventory:GetItem(playerId, item.itemId)
+                    local valid = current and current.kind == "Chicken" and current.typeId == item.typeId
+                        and current.finalSellPrice == item.finalSellPrice and house.slots[slot.slotIndex] == previous
+                        and SlotUnlocked(playerId, slot.slotIndex)
+                        and (previous ~= nil or house.count < ChickenCapacity(playerId))
+                    local transferred, removed
+                    if valid then
+                        transferred, removed = inventory:TransferChicken(playerId, item.itemId,
+                            previous and previous.chicken or nil, "panel_equip")
+                    end
+                    if transferred then
+                        house.slots[slot.slotIndex] = { chicken = removed, rootId = prepared.rootId }
+                        if not previous then house.count = house.count + 1 end
+                        prepared.rootId, job.changed = nil, true
+                        if previous then replaced[#replaced + 1] = previous.rootId end
+                    else
+                        job.failures = job.failures + 1
+                        Log:PrintError("[AnimalEquipment] 提交失败，保留原鸡", playerId, slot.slotIndex,
+                            tostring(removed or "item_or_slot_changed"))
+                    end
+                end
+                for _, rootId in ipairs(replaced) do DestroyRoot(rootId, "panel_replace") end
+                FinishPanel(job); return
+            end
+            local previous = house.slots[task.slot.slotIndex]
+            local step = {}
+            job.step = step
+            local function Fail(err)
+                if not PanelCurrent(job) or job.step ~= step then return end
+                if job.rootId then DestroyRoot(job.rootId, "panel_failed"); job.rootId = nil end
+                job.failures = job.failures + 1
+                Log:PrintError("[AnimalEquipment] 本项失败，保留原鸡并继续", playerId, task.slot.slotIndex, tostring(err))
+                Next()
+            end
+            if task.recall then
+                local ok, err = inventory:TransferChicken(playerId, nil, previous.chicken, "panel_recall")
+                if not ok then Fail(err); return end
+                house.slots[task.slot.slotIndex], house.count = nil, house.count - 1
+                job.changed = true
+                DestroyRoot(previous.rootId, "panel_recall")
+                Next(); return
+            end
+            local item = inventory:GetItem(playerId, task.item.itemId)
+            if not item or item.kind ~= "Chicken" or item.typeId ~= task.item.typeId
+                or item.finalSellPrice ~= task.item.finalSellPrice then Fail("item_changed"); return end
+            local config = GameConfig.ChickenTypes[item.typeId]
+            local received = false
+            local ok, err = pcall(function()
+                local position = Element:GetPosition(task.slot.elementId)
+                local rotation = Element:GetRotation(task.slot.elementId)
+                if not position or not rotation then error("slot_transform_unavailable") end
+                context.ElementCopy:CopyTree(config.TemplateRootId, position, "面板放鸡:" .. tostring(playerId), function(result)
+                    if received then return end
+                    received = true
+                    if not PanelCurrent(job) or job.step ~= step then
+                        if result.success then DestroyRoot(result.rootId, "late_panel_copy") end
+                        FinishPanel(job, "interaction_expired")
+                        return
+                    end
+                    if not result.success then Fail(result.reason); return end
+                    job.rootId = result.rootId
+                    local configured, configureError = pcall(function()
+                        Element:SetRotation(job.rootId, rotation, Element.COORDINATE.World)
+                        local scale = item.finalSellPrice / config.ChickenSellPrice
+                        Element:SetScale(job.rootId, Engine.Vector(scale, scale, scale))
+                        context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+                            if not PanelCurrent(job) then FinishPanel(job, "interaction_expired"); return end
+                            if job.step ~= step then return end
+                            local current = inventory:GetItem(playerId, item.itemId)
+                            if not current or current.typeId ~= item.typeId or current.finalSellPrice ~= item.finalSellPrice
+                                or house.slots[task.slot.slotIndex] ~= previous or not SlotUnlocked(playerId, task.slot.slotIndex)
+                                or (not previous and house.count >= ChickenCapacity(playerId)) then Fail("item_or_slot_changed"); return end
+                            local readOk, p, r = pcall(function()
+                                return Element:GetPosition(job.rootId), Element:GetRotation(job.rootId)
+                            end)
+                            if not readOk or not p or not r then Fail("placement_transform_unavailable"); return end
+                            job.prepared[#job.prepared + 1] = { item = item, slot = task.slot,
+                                previous = previous, rootId = job.rootId }
+                            job.rootId = nil
+                            Next()
+                        end)
+                    end)
+                    if not configured then Fail(configureError) end
+                end)
+            end)
+            if not ok then Fail(err) end
+        end
+        Next()
+    end)
+
     runtime.CancelCallback = Protect(function(_, message, playerId)
         if type(message) ~= "table" then return end
         local target = runtime.Targets[playerId]
@@ -432,6 +699,7 @@ function PlacementService:Start(context)
         SendState(playerId)
     end)
     runtime.PreleaveCallback = Protect(function(playerId)
+        CancelPanel(playerId, "player_preleave")
         PrepareLeave(playerId)
         restoreOperations[playerId] = nil
         ClearTarget(playerId)
@@ -544,6 +812,9 @@ function PlacementService:Start(context)
     runtime.Cleanup = function()
         restoreOperations = {}
         runtime.Stopped = true
+        local jobs = {}
+        for _, job in pairs(runtime.PanelJobs) do jobs[#jobs + 1] = job end
+        for _, job in ipairs(jobs) do FinishPanel(job, "module_stopped") end
         for playerId, target in pairs(runtime.Targets) do
             InvalidateOperation(target)
             runtime.Revision = runtime.Revision + 1
@@ -568,14 +839,20 @@ function PlacementService:Start(context)
     System:BindNotify(context.NetMsg.Messages.PlacementAction, runtime.ActionCallback)
     System:BindNotify(context.NetMsg.Messages.PlacementCancel, runtime.CancelCallback)
     System:BindNotify(context.NetMsg.Messages.PlacementSnapshotRequest, runtime.SnapshotCallback)
+    System:BindNotify(context.NetMsg.Messages.AnimalEquipmentSnapshotRequest, runtime.PanelSnapshotCallback)
+    System:BindNotify(context.NetMsg.Messages.AnimalEquipmentAction, runtime.PanelActionCallback)
     context.Events:Subscribe(PlacementService.Name, "HomeReleased", Protect(function(snapshot)
         ClearHome(snapshot.playerId, snapshot.homeId)
     end))
     context.Events:Subscribe(PlacementService.Name, "InventoryChanged", Protect(function(snapshot)
-        if runtime.Ready and not runtime.Committing then
+        if runtime.Ready and not runtime.Committing and not runtime.PanelJobs[snapshot.playerId] then
             RefreshTarget(snapshot.playerId)
             SendState(snapshot.playerId)
+            SendPanel(snapshot.playerId)
         end
+    end))
+    context.Events:Subscribe(PlacementService.Name, "PlacedChickensChanged", Protect(function(snapshot)
+        if not runtime.PanelJobs[snapshot.playerId] then SendPanel(snapshot.playerId) end
     end))
     context.Timers:AddTimer(PlacementService.Name, GameConfig.Runtime.ServerReadyDelaySeconds, function()
         if Active() then
@@ -596,6 +873,8 @@ function PlacementService:Stop(context)
     System:UnbindNotify(context.NetMsg.Messages.PlacementAction, runtime.ActionCallback)
     System:UnbindNotify(context.NetMsg.Messages.PlacementCancel, runtime.CancelCallback)
     System:UnbindNotify(context.NetMsg.Messages.PlacementSnapshotRequest, runtime.SnapshotCallback)
+    System:UnbindNotify(context.NetMsg.Messages.AnimalEquipmentSnapshotRequest, runtime.PanelSnapshotCallback)
+    System:UnbindNotify(context.NetMsg.Messages.AnimalEquipmentAction, runtime.PanelActionCallback)
     context.Events:UnsubscribeOwner(PlacementService.Name)
     context.Timers:RemoveOwner(PlacementService.Name)
 end

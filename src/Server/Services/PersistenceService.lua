@@ -276,9 +276,13 @@ function PersistenceService:Start(context)
         if not text then return false, reason end
         return WriteEncoded(playerId, generation, text, completed)
     end
-    -- 适配器只通过导出/恢复接口接入；七个模块全部登记前玩法保持闭锁。
+    -- 适配器只通过导出/恢复接口接入；启用的模块全部登记前玩法保持闭锁。
     local adapterOrder = { "production", "placement", "treadmill", "speed", "home", "economy", "inventory" }
     local restoreOrder = { "inventory", "economy", "home", "speed", "treadmill", "placement", "production" }
+    if require("Common.Config.FeatureFlags").Values.Tutorial then
+        adapterOrder[#adapterOrder + 1] = "tutorial"
+        restoreOrder[#restoreOrder + 1] = "tutorial"
+    end
     local adapters, productionStates, loadTriggers = {}, {}, {}
     local sealed, startupReady = false, false
     local statusVersion = 0

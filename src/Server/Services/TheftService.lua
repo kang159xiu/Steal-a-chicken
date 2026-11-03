@@ -648,7 +648,7 @@ function TheftService:Start(context)
         return true
     end
 
-    local function SpawnRegion(region, generation, onComplete)
+    local function SpawnRegion(region, generation, onComplete, reservePoints)
         local allSpawnPoints = FindSpawnPoints(region)
         if #allSpawnPoints < region.SpawnPointCount then
             error("启用区域的鸡生成点少于配置数量，regionId=" .. tostring(region.RegionId)
@@ -656,6 +656,13 @@ function TheftService:Start(context)
                 .. " actual=" .. tostring(#allSpawnPoints))
         end
         local spawnPoints = ChooseSpawnPoints(allSpawnPoints, region.SpawnPointCount)
+        local reservations = reservePoints and {} or nil
+        if reservations then
+            for _, pointId in ipairs(spawnPoints) do
+                local token = {}
+                reservations[pointId], runtime.ReturnReservations[pointId] = token, token
+            end
+        end
         local registration = true -- 区域批量登记，仅区域全部请求结束后广播。
         local completedCount = 0
         local function SpawnNextPoint()
@@ -669,6 +676,7 @@ function TheftService:Start(context)
                 return
             end
             local currentSpawnPointId = spawnPoints[completedCount + 1]
+            local reservation = reservations and reservations[currentSpawnPointId]
             local position = Element:GetPosition(currentSpawnPointId)
             if not position then
                 error("无法读取鸡生成点位置，spawnPointId=" .. tostring(currentSpawnPointId))
@@ -678,6 +686,9 @@ function TheftService:Start(context)
             local function TryNextType()
                 if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= generation then return end
                 if #remainingPool == 0 then
+                    if reservation and runtime.ReturnReservations[currentSpawnPointId] == reservation then
+                        runtime.ReturnReservations[currentSpawnPointId] = nil
+                    end
                     completedCount = completedCount + 1
                     SpawnNextPoint()
                     return
@@ -686,6 +697,7 @@ function TheftService:Start(context)
                 for index = #remainingPool, 1, -1 do
                     if remainingPool[index].ChickenType == currentChickenType then table.remove(remainingPool, index) end
                 end
+                if reservation then runtime.ReturnReservations[currentSpawnPointId] = reservation end
                 CopyChicken(region, currentSpawnPointId, currentChickenType, position, generation, function(success)
                     if runtime.Stopped or context.Services.TheftService ~= runtime or runtime.Generation ~= generation then return end
                     if success then
@@ -694,11 +706,50 @@ function TheftService:Start(context)
                     else
                         TryNextType()
                     end
-                end, nil, registration)
+                end, reservation, registration)
             end
             TryNextType()
         end
         SpawnNextPoint()
+    end
+
+    function runtime:GetTutorialTargets()
+        local models, count, holders = {}, 0, {}
+        for id, pickup in pairs(self.Pickups) do holders[pickup.rootId] = id end
+        for rootId, chicken in pairs(self.ChickensByRoot) do
+            local localTarget = chicken.state == "Egg" or chicken.state == "EggAttacking"
+                or chicken.state == "Hatching" or chicken.state == "Available"
+            if chicken.regionId == GameConfig.Tutorial.RegionId and not chicken.isDropped and localTarget then count = count + 1 end
+            if localTarget and (chicken.regionId == GameConfig.Tutorial.RegionId or chicken.isDropped) then
+                local p = chicken.pickupPosition
+                models[#models + 1] = { rootId = rootId, eggRootId = chicken.eggRootId,
+                    regionId = chicken.regionId, state = chicken.state, attackPlayerId = chicken.attackPlayerId, pickupPlayerId = holders[rootId],
+                    isDropped = chicken.isDropped, position = { X = p.X, Y = p.Y, Z = p.Z } }
+            end
+        end
+        if count > 0 then self.TutorialEmptyAttempted = false end
+        return models, count
+    end
+    function runtime:EnsureTutorialRegion()
+        if self.Stopped or not self.Ready or self.Refreshing or self.Generating or self.RefreshRoots
+            or self.TutorialGenerating or self.TutorialEmptyAttempted then return end
+        local _, count = self:GetTutorialTargets()
+        if count > 0 then return end
+        local generation = self.Generation
+        for _, region in ipairs(GameConfig.Regions) do
+            if region.RegionId == GameConfig.Tutorial.RegionId then
+                -- 倒计时补鸡已预约的原点仍在生成中，不再启动整区补蛋。
+                for _, pointId in ipairs(FindSpawnPoints(region)) do
+                    if self.ReturnReservations[pointId] then return end
+                end
+                self.TutorialGenerating, self.TutorialEmptyAttempted = true, true
+                SpawnRegion(region, generation, function()
+                    if self.Stopped or context.Services.TheftService ~= self or self.Generation ~= generation then return end
+                    self.TutorialGenerating = false
+                end, true)
+                return
+            end
+        end
     end
 
     local function DropPlayerChicken(playerId, reason)
@@ -1197,6 +1248,7 @@ function TheftService:Start(context)
 
     function runtime:BeginRefresh(onCleared)
         if self.Stopped or self.Refreshing then error("偷鸡刷新入口状态无效") end
+        self.TutorialGenerating, self.TutorialEmptyAttempted = false, false
         self.Generation = self.Generation + 1
         local generation = self.Generation
         self.Ready = false
@@ -1215,6 +1267,7 @@ function TheftService:Start(context)
         self.RefreshRoots = oldChickens
         self.ChickensByRoot = {}
         SendWorldModels()
+        context.Events:Publish("TutorialWorldReset", { generation = generation })
         for rootId, chicken in pairs(oldChickens) do
             chicken.operation = chicken.operation + 1
             Element:UnBinding(rootId)

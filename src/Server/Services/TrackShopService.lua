@@ -117,6 +117,7 @@ function TrackShopService:Start(context)
             end
             Notify("economy", publishMoney)
             Notify("growth", publishGrowth)
+            if not owned then context.Events:Publish("TutorialTrackPurchased", { playerId = id }) end
             Send(id); Result(true, not changed and "already_equipped" or (owned and "track_equipped" or "track_purchased"))
         end)
         rebirth:ReleasePurchaseLock(id, lock)

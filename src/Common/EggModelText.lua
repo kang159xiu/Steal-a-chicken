@@ -8,7 +8,7 @@ function EggModelText.FormatPrice(value)
         fraction = fraction:gsub("0+$", "")
         return fraction == "" and "" or "." .. fraction
     end)
-    return "~" .. text .. "$"
+    return text .. "$"
 end
 
 return EggModelText
