@@ -76,21 +76,33 @@ function PlayerSpeedService:Start(context)
         local state = rt.Players[id] or Ensure(id)
         return state and Snapshot(state) or nil
     end
-    function rt:AddExperience(id, generation, amount)
-        if not CanPlay(id) then return false, "persistence_not_ready" end
+    -- 礼包与训练共用经验计算；准备不提交，凭证消费后一次提交，再通知。
+    function rt:PrepareExperienceCommit(id, amount)
+        if not CanPlay(id) then return nil, "persistence_not_ready" end
         local state = Ensure(id)
-        if not state or not Current(id, state) or rt.Dead[id] then
-            return false, "session_unavailable"
-        end
+        if not state or not Current(id, state) or rt.Dead[id] then return nil, "session_unavailable" end
         local experience = Decimal.Add(state.experience, amount)
         local level, remaining, requirement = SpeedGrowth.Advance(state.level,
             Decimal.Add(state.speedUpgradeExperience, amount), state.speedUpgradeRequirement)
-        local previousLevel = state.level
-        state.experience, state.level, state.speedUpgradeExperience, state.speedUpgradeRequirement = experience, level, remaining, requirement
-        if amount ~= "0" then state.experienceDirty = true end
-        if state.level ~= previousLevel then Apply(id, state) end
-        self:FlushExperience(id)
-        Publish(id, state)
+        local previousLevel, committed = state.level, false
+        return function()
+            if committed or rt.Players[id] ~= state or not CanPlay(id) then return false, "session_unavailable" end
+            committed = true
+            state.experience, state.level, state.speedUpgradeExperience, state.speedUpgradeRequirement = experience, level, remaining, requirement
+            if amount ~= "0" then state.experienceDirty = true end
+            return true, function()
+                if state.level ~= previousLevel then Apply(id, state) end
+                self:FlushExperience(id)
+                Publish(id, state)
+            end
+        end
+    end
+    function rt:AddExperience(id, generation, amount)
+        local commit, reason = self:PrepareExperienceCommit(id, amount)
+        if not commit then return false, reason end
+        local ok, publish = commit()
+        if not ok then return false, publish end
+        publish()
         return true
     end
     -- 倍率派生自同一成长记录，金额不转number；只做本玩法需要的小整数乘法/精确除2。

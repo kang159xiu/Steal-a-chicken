@@ -1,6 +1,10 @@
 local GameConfig = require "Common.Config.GameConfig"
 local SafeCall = require "Common.Core.SafeCall"
 local Decimal = require "Common.DecimalInteger"
+local ReplicaDiag = require "Common.Debug.TreadmillReplicaDiag"
+local RestoreDiag = require "Common.Debug.HomeModelRestoreDiag"
+local PreplacedConfig = require "Common.Config.TreadmillPreplaced"
+local PreplacedPool = require "Server.TreadmillPreplaced"
 local TreadmillService = { Name = "TreadmillService", FeatureFlag = "Treadmill",
     Dependencies = { "HomeService", "EconomyService", "PlayerSpeedService" } }
 local function Integer(value)
@@ -10,10 +14,19 @@ function TreadmillService:Start(context)
     if context.Side ~= "Server" then return end
     local c, rows, messages = GameConfig.Treadmill, GameConfig.TreadmillLevels, context.NetMsg.Messages
     local home, economy, speed = context.Services.HomeService, context.Services.EconomyService, context.Services.PlayerSpeedService
+    local preplaced = PreplacedConfig.Enabled and PreplacedPool.new() or nil
     local rt = { Active = true, Ready = false, Players = {}, Departed = {}, Dead = {}, OwnedRoots = {},
-        Version = 0, TargetVersion = 0 }
+        Version = 0, TargetVersion = 0, ReplicaVersion = 0, Replicas = {}, InitialQueue = {} }
     context.Services.TreadmillService = rt
     local persistence = context.Services.PersistenceService
+    local function Diag(stage, id, state, op, reason)
+        RestoreDiag.Log("Server", "treadmill", stage, function()
+            return { playerId = id, homeId = state and state.homeId, level = state and state.level,
+                operation = op and op.targetVersion, rootId = op and op.rootId or (state and state.rootId),
+                templateId = state and rows[(op and op.level) or state.level].TemplateRootId,
+                queueCount = #rt.InitialQueue, reason = reason }
+        end)
+    end
     local function CanPlay(id)
         return not GameConfig.Persistence.ProductionEnabled or (persistence and persistence:IsReady(id))
     end
@@ -41,18 +54,60 @@ function TreadmillService:Start(context)
         end
         return ok and result == true
     end
-    local function Destroy(rootId)
+    local function SendReplicas(recipient, entry)
+        pcall(function()
+            local models = {}
+            if entry then models[1] = entry
+            else for _, model in pairs(rt.Replicas) do models[#models + 1] = model end end
+            if recipient then System:SendToClient(recipient, messages.TreadmillReplicaDiag, { models = models })
+            else System:SendToAllClients(messages.TreadmillReplicaDiag, { models = models }) end
+            RestoreDiag.Log("Server", "treadmill", "models_sent", function()
+                local ids = {}; for _, model in ipairs(models) do ids[#ids + 1] = tostring(model.rootId) end
+                return { recipient = recipient or "all", count = #models, rootIds = table.concat(ids, ",") }
+            end)
+        end)
+    end
+    local function CommitReplica(id, state, op)
+        pcall(function()
+            rt.ReplicaVersion = rt.ReplicaVersion + 1
+            local entry = { playerId = id, homeId = state.homeId, level = state.level,
+                sessionGeneration = state.generation, operation = op.targetVersion,
+                version = rt.ReplicaVersion, rootId = state.rootId, positionId = state.positionId,
+                templateId = rows[state.level].TemplateRootId, nodeIds = op.replicaNodeIds }
+            rt.Replicas[state.homeId] = entry
+            Diag("model_committed", id, state, op)
+            ReplicaDiag.Sample("Server", entry, "committed")
+            SendReplicas(nil, entry)
+        end)
+    end
+    local function Destroy(rootId, reason, lease)
         if not rootId or not rt.OwnedRoots[rootId] then return end
+        if preplaced and rt.OwnedRoots[rootId] ~= lease then return end
+        RestoreDiag.Log("Server", "treadmill", preplaced and "model_recycled" or "model_destroy",
+            { rootId = rootId, reason = reason or "owned_root_cleanup" })
         rt.OwnedRoots[rootId] = nil
-        local ok, result = pcall(function() return context.ElementCopy:DestroyTree(rootId) end)
-        if not ok or result ~= true then Log:PrintError("[Treadmill] 运行模型销毁失败，不重试", rootId, tostring(result)) end
+        pcall(function()
+            for homeId, entry in pairs(rt.Replicas) do
+                if entry.rootId == rootId then
+                    rt.ReplicaVersion = rt.ReplicaVersion + 1
+                    local cleared = { homeId = homeId, version = rt.ReplicaVersion, cleared = true }
+                    rt.Replicas[homeId] = cleared
+                    SendReplicas(nil, cleared)
+                end
+            end
+        end)
+        local ok, result = pcall(function()
+            if preplaced then return preplaced:Release(rootId, lease) end
+            return context.ElementCopy:DestroyTree(rootId)
+        end)
+        if not ok or result ~= true then Log:PrintError("[Treadmill] 运行模型清理失败，不重试", rootId, tostring(result)) end
     end
     local function UpdatePreview(id, state, snapshot)
         snapshot = snapshot or speed:GetSnapshot(id)
         local level = state and state.level or 1
         local amount = snapshot and speed:GetExperiencePerTick(id, snapshot.sessionGeneration, rows[level].ExperiencePerTick)
         local nextAmount = snapshot and rows[level + 1] and speed:GetExperiencePerTick(id, snapshot.sessionGeneration, rows[level + 1].ExperiencePerTick)
-        if state and amount then home:UpdateTreadmillExperienceText(state.homeId, level, amount, nextAmount) end
+        if state and amount then home:UpdateTreadmillExperienceText(state.homeId, level, amount) end
         return amount, nextAmount
     end
     local function Send(id)
@@ -76,12 +131,41 @@ function TreadmillService:Start(context)
             multiplier = snapshot and snapshot.multiplier,
         })
     end
+    local function StartNextInitial()
+        if not Active() or not rt.Ready or rt.InitialCurrent or rt.InitialTimer then return end
+        local op = table.remove(rt.InitialQueue, 1)
+        if not op then return end
+        rt.InitialCurrent = op
+        Diag("queue_start", op.playerId, op.state, op)
+        op.start()
+    end
+    local function FinishInitial(op)
+        if rt.InitialCurrent ~= op then return end
+        Diag("queue_finished", op.playerId, op.state, op)
+        rt.InitialCurrent = nil
+        if not Active() then return end
+        rt.InitialTimer = context.Timers:AddTimer(self.Name, c.InitialSpawnIntervalSeconds, function()
+            rt.InitialTimer = nil
+            StartNextInitial()
+        end)
+        if op.onInitialFinished then op.onInitialFinished() end
+    end
     local function CancelOperation(state)
         local op = state.operation
         state.operation = nil
         if op then
-            op.invalid = true; Destroy(op.rootId)
-            if op.reset and op.result then op.result(false, "reset_cancelled") end
+            Diag("operation_cancelled", op.playerId, state, op)
+            op.invalid = true
+            if not op.reusesCurrent then Destroy(op.rootId, "operation_cancelled", op.modelLease) end
+            for i, pending in ipairs(rt.InitialQueue) do
+                if pending == op then
+                    table.remove(rt.InitialQueue, i)
+                    if op.onInitialFinished then op.onInitialFinished() end
+                    break
+                end
+            end
+            -- 在途复制没有取消接口；等待原回调/超时收尾后再释放队列，避免重叠。
+            if op.reset and not op.initial and op.result then op.result(false, "reset_cancelled") end
         end
     end
     local function StopTraining(id, state)
@@ -92,152 +176,181 @@ function TreadmillService:Start(context)
         if state.operation and state.operation.upgrade then CancelOperation(state) end
         if changed then state.targetVersion = NextTarget(); Send(id) end
     end
-    local function Drop(id)
+    local function Drop(id, reason)
         local state = rt.Players[id]
+        Diag("player_model_cleanup", id, state, state and state.operation, reason)
         rt.Players[id] = nil
-        if state then CancelOperation(state); Destroy(state.rootId); NextTarget() end
+        if state then CancelOperation(state); Destroy(state.rootId, reason, state.modelLease); NextTarget() end
     end
     local function CopyDiagnosticId(id, state, level)
         return "Treadmill:" .. state.homeId .. ":" .. level .. ":player=" .. tostring(id)
             .. ":session=" .. tostring(state.generation) .. ":target=" .. tostring(state.targetVersion)
     end
-    local function RestoreDiagnostic(stage, id, state, level, reason)
-        pcall(function()
-            local fields = {}
-            local function Read(name, getter)
-                local ok, value = pcall(getter)
-                local converted, text = pcall(tostring, value)
-                fields[#fields + 1] = name .. "=" .. (ok and converted and text or "unavailable")
-            end
-            Read("playerId", function() return id end)
-            Read("session", function() return state.generation end)
-            Read("homeId", function() return state.homeId end)
-            Read("level", function() return level end)
-            Read("templateId", function() return rows[level].TemplateRootId end)
-            Read("copyContext", function() return CopyDiagnosticId(id, state, level) end)
-            Read("timestampMs", function() return MiscService:GetServerTimestamp() end)
-            Read("reason", function() return reason end)
-            if stage ~= "restore_complete" then
-                for _, key in ipairs({ "Ready", "Generating", "Refreshing", "Generation", "Stopped" }) do
-                    Read("theft." .. key, function()
-                        local theft = context.Services.TheftService
-                        if not theft then return "module_missing" end
-                        return theft[key]
-                    end)
-                end
-            end
-            pcall(function() Log:PrintServerLog("[TreadmillRestoreDiag]", stage, table.concat(fields, " | ")) end)
-        end)
-    end
-    local function CopyModel(id, state, level, upgrade, result, reset)
+    local function CopyModel(id, state, level, upgrade, result, reset, initial)
         local op = { level = level, upgrade = upgrade, targetVersion = state.targetVersion, reset = reset, result = result,
-            playerId = id, generation = state.generation, state = state }
+            playerId = id, state = state, initial = initial }
         state.operation = op
         local function Valid()
             return Current(id, state) and not rt.Dead[id] and state.operation == op and not op.invalid
                 and (not upgrade or (state.training and state.targetVersion == op.targetVersion and Inside(id, state)))
         end
         local function FinishFailure(reason, disable, copyFailed)
-            if state.operation ~= op then return end
+            Diag("copy_failed", id, state, op, reason)
+            if state.operation ~= op then FinishInitial(op); return end
             state.operation = nil
             if disable and not copyFailed then state.disabled = true; state.training = false; state.targetVersion = NextTarget() end
             Log:PrintError("[Treadmill] 模型操作失败，未扣款/未升级", "homeId:", state.homeId, "level:", level, "reason:", tostring(reason))
             if result and (reset or Current(id, state)) then result(false, reason, copyFailed) end
             Send(id)
+            FinishInitial(op)
         end
-        local position, rotation
-        local readOk, readError = pcall(function()
-            position, rotation = Element:GetPosition(state.positionId), Element:GetRotation(state.positionId)
-            if not position or not rotation then error("跑步机位置或旋转不可用") end
-        end)
-        if not readOk then FinishFailure(tostring(readError), not reset); return op end
-        local ok, err = pcall(function()
-            context.ElementCopy:CopyTree(rows[level].TemplateRootId, position, CopyDiagnosticId(id, state, level), function(copy)
-                -- 此回调不能使用Active包装：Stop后到达的完整复制也必须清理。
-                if type(copy) ~= "table" or copy.success ~= true or not Integer(copy.rootId) then
-                    if Active() then FinishFailure(type(copy) == "table" and copy.reason or "copy_failed", not upgrade and not reset, true) end
-                    return -- 部分失败副本按ElementCopy契约保留，不重试。
-                end
-                local root = copy.rootId
-                for _, row in ipairs(rows) do
-                    if row.TemplateRootId == root then FinishFailure("copy_returned_source", not upgrade and not reset); return end
-                end
-                rt.OwnedRoots[root] = true; op.rootId = root
-                if not Valid() then Destroy(root); return end
-                local rotated, rotationError = pcall(function() Element:SetRotation(root, rotation, Element.COORDINATE.World) end)
-                if not rotated then Destroy(root); FinishFailure(tostring(rotationError), not upgrade and not reset); return end
-                if not Valid() then Destroy(root); return end
-                context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
-                    if not Valid() then Destroy(root); return end
-                    local verified, verifyError = pcall(function()
-                        local actual = Element:GetPosition(root)
-                        if not actual or math.abs(actual.X-position.X) > 0.1 or math.abs(actual.Y-position.Y) > 0.1
-                            or math.abs(actual.Z-position.Z) > 0.1 then error("模型实际位置不匹配") end
-                        local actualRotation = Element:GetRotation(root)
-                        if not actualRotation then error("模型实际旋转不可用") end
-                        for _, axis in ipairs({ "X", "Y", "Z" }) do
-                            local delta = (actualRotation[axis] - rotation[axis] + 180) % 360 - 180
-                            if math.abs(delta) > 0.1 then error("模型实际旋转不匹配: " .. axis) end
-                        end
-                    end)
-                    if not verified then Destroy(root); FinishFailure(tostring(verifyError), not upgrade and not reset); return end
-                    if not Valid() then Destroy(root); return end
-                    if reset then op.prepared = true; if result then result(true, op) end; return end
-                    local oldRoot, notify = state.rootId, nil
-                    if upgrade then
-                        if state.level + 1 ~= level then Destroy(root); FinishFailure("stale_level", false); return end
-                        local debited, value = economy:TryDebit(id, state.generation, rows[state.level].UpgradeCost)
-                        if not debited then Destroy(root); FinishFailure(value, false); return end
-                        state.level = level -- 扣款后立即提交，无等待/引擎调用/通知。
-                        notify = value
-                    end
-                    if upgrade and persistence then persistence:MarkDirty(id, "treadmill_upgrade") end
-                    state.rootId = root; state.operation = nil; state.targetVersion = NextTarget()
-                    UpdatePreview(id, state)
-                    if upgrade then
-                        local signOk, signError = pcall(function() System:FireSignEvent("跑步机升级", { id }) end)
-                        if not signOk then Log:PrintError("[Treadmill] 升级成功信号发送失败", id, tostring(signError)) end
-                    end
-                    if not upgrade and Inside(id, state) then state.training = true end
-                    if notify then
-                        local notified, notifyError = pcall(notify)
-                        if not notified then Log:PrintError("[Treadmill] 已提交升级通知失败，不重试", tostring(notifyError)) end
-                    end
-                    Destroy(oldRoot)
-                    if Current(id, state) then
-                        if upgrade then
-                            context.Events:Publish("TreadmillLevelChanged", { playerId = id, homeId = state.homeId,
-                                sessionGeneration = state.generation, level = state.level })
-                            if result then result(true, "upgraded") end
-                        end
-                        Send(id)
-                    end
-                end)
+        local function StartCopy()
+            if initial and not Valid() then
+                Diag("queue_skipped", id, state, op, "operation_not_current_or_player_unavailable")
+                if state.operation == op then CancelOperation(state) end
+                FinishInitial(op)
+                return
+            end
+            local position, rotation
+            local readOk, readError = pcall(function()
+                position, rotation = Element:GetPosition(state.positionId), Element:GetRotation(state.positionId)
+                if not position or not rotation then error("跑步机位置或旋转不可用") end
             end)
-        end)
-        if not ok then
-            Destroy(op.rootId)
-            FinishFailure(tostring(err), not upgrade and not reset)
+            if not readOk then FinishFailure(tostring(readError), not reset); return op end
+            local ok, err = pcall(function()
+                Diag(preplaced and "preplaced_requested" or "copy_requested", id, state, op)
+                local function ModelReady(copy)
+                    RestoreDiag.Log("Server", "treadmill", preplaced and "preplaced_acquired" or "copy_result", function()
+                        return { playerId = id, homeId = state.homeId, operation = op.targetVersion,
+                            templateId = rows[level].TemplateRootId, success = copy.success, rootId = copy.rootId,
+                            reason = copy.reason, nodeCount = copy.spawnedIds and #copy.spawnedIds }
+                    end)
+                    -- 此回调不能使用Active包装：Stop后到达的完整复制也必须清理。
+                    if type(copy) ~= "table" or copy.success ~= true or not Integer(copy.rootId) then
+                        if Active() then FinishFailure(type(copy) == "table" and copy.reason or "copy_failed", not upgrade and not reset, true)
+                        else FinishInitial(op) end
+                        return -- 部分失败副本按ElementCopy契约保留，不重试。
+                    end
+                    local root = copy.rootId
+                    if not preplaced then
+                        for _, row in ipairs(rows) do
+                            if row.TemplateRootId == root then FinishFailure("copy_returned_source", not upgrade and not reset); return end
+                        end
+                    end
+                    op.modelLease, op.reusesCurrent = copy.modelLease, copy.reusesCurrent
+                    rt.OwnedRoots[root] = preplaced and op.modelLease or true; op.rootId = root
+                    op.replicaNodeIds = copy.spawnedIds
+                    local function Discard()
+                        if not op.reusesCurrent then Destroy(root, "operation_not_committed", op.modelLease) end
+                    end
+                    if not Valid() then Discard(); FinishInitial(op); return end
+                    local rotated, rotationError = pcall(function()
+                        Element:SetRotation(root, rotation, Element.COORDINATE.World)
+                        if preplaced then Element:SetPosition(root, position, Element.COORDINATE.World) end
+                    end)
+                    if not rotated then Discard(); FinishFailure(tostring(rotationError), not upgrade and not reset); return end
+                    if not Valid() then Discard(); FinishInitial(op); return end
+                    context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+                        if not Valid() then Discard(); FinishInitial(op); return end
+                        local verified, verifyError = pcall(function()
+                            local actual = Element:GetPosition(root)
+                            if not actual or math.abs(actual.X-position.X) > 0.1 or math.abs(actual.Y-position.Y) > 0.1
+                                or math.abs(actual.Z-position.Z) > 0.1 then error("模型实际位置不匹配") end
+                            local actualRotation = Element:GetRotation(root)
+                            if not actualRotation then error("模型实际旋转不可用") end
+                            for _, axis in ipairs({ "X", "Y", "Z" }) do
+                                local delta = (actualRotation[axis] - rotation[axis] + 180) % 360 - 180
+                                if math.abs(delta) > 0.1 then error("模型实际旋转不匹配: " .. axis) end
+                            end
+                        end)
+                        if not verified then Discard(); FinishFailure(tostring(verifyError), not upgrade and not reset); return end
+                        RestoreDiag.Sample("Server", "treadmill", "transform_verified", { playerId = id,
+                            homeId = state.homeId, operation = op.targetVersion, rootId = root, templateId = rows[level].TemplateRootId })
+                        if not Valid() then Discard(); FinishInitial(op); return end
+                        if reset then op.prepared = true; if result then result(true, op) end; FinishInitial(op); return end
+                        local oldRoot, oldLease, notify = state.rootId, state.modelLease, nil
+                        if upgrade then
+                            if state.level + 1 ~= level then Discard(); FinishFailure("stale_level", false); return end
+                            local debited, value = economy:TryDebit(id, state.generation, rows[state.level].UpgradeCost)
+                            if not debited then Discard(); FinishFailure(value, false); return end
+                            state.level = level -- 扣款后立即提交，无等待/引擎调用/通知。
+                            notify = value
+                        end
+                        if upgrade and persistence then persistence:MarkDirty(id, "treadmill_upgrade") end
+                        state.rootId = root; state.modelLease = op.modelLease; state.operation = nil; state.targetVersion = NextTarget()
+                        CommitReplica(id, state, op)
+                        UpdatePreview(id, state)
+                        if upgrade then
+                            local signOk, signError = pcall(function() System:FireSignEvent("跑步机升级", { id }) end)
+                            if not signOk then Log:PrintError("[Treadmill] 升级成功信号发送失败", id, tostring(signError)) end
+                        end
+                        if not upgrade and Inside(id, state) then state.training = true end
+                        if notify then
+                            local notified, notifyError = pcall(notify)
+                            if not notified then Log:PrintError("[Treadmill] 已提交升级通知失败，不重试", tostring(notifyError)) end
+                        end
+                        if oldRoot ~= root then Destroy(oldRoot, "model_replaced", oldLease) end
+                        if Current(id, state) then
+                            if upgrade then
+                                context.Events:Publish("TreadmillLevelChanged", { playerId = id, homeId = state.homeId,
+                                    sessionGeneration = state.generation, level = state.level })
+                                if result then result(true, "upgraded") end
+                            end
+                            Send(id)
+                        end
+                        FinishInitial(op)
+                    end)
+                end
+                if preplaced then
+                    local model, reason = preplaced:Acquire(level, state.homeId, op, state.rootId)
+                    if not model then FinishFailure(reason, not upgrade and not reset); return end
+                    ModelReady(model)
+                else
+                    context.ElementCopy:CopyTree(rows[level].TemplateRootId, position, CopyDiagnosticId(id, state, level), ModelReady, true, id)
+                end
+            end)
+            if not ok then
+                if not op.reusesCurrent then Destroy(op.rootId, "model_operation_error", op.modelLease) end
+                FinishFailure(tostring(err), not upgrade and not reset)
+            end
+        end
+        if initial then
+            op.start = StartCopy
+            rt.InitialQueue[#rt.InitialQueue + 1] = op
+            Diag("queue_enqueued", id, state, op)
+            StartNextInitial()
+        else
+            StartCopy()
         end
         return op
     end
     local function Ensure(id)
-        if not CanPlay(id) or not Active() or not rt.Ready or rt.Departed[id] or not home.TreadmillResourcesReady then return nil end
+        if not CanPlay(id) then Diag("ensure_blocked", id, nil, nil, "persistence_not_ready"); return nil end
+        if not Active() then Diag("ensure_blocked", id, nil, nil, "module_inactive"); return nil end
+        if not rt.Ready then Diag("ensure_blocked", id, nil, nil, "module_not_ready"); return nil end
+        if rt.Departed[id] then Diag("ensure_blocked", id, nil, nil, "player_departed"); return nil end
+        if not home.TreadmillResourcesReady then Diag("ensure_blocked", id, nil, nil, "home_resources_not_ready"); return nil end
         local homeId, generation = home:GetPlayerHome(id), economy:GetSessionGeneration(id)
         local state = rt.Players[id]
         if state and state.homeId ~= homeId then Drop(id); state = nil end
         if not homeId or not generation or not economy:IsCurrent(id, generation) or not home:IsOwner(id, homeId)
-            or not Online(id) then return nil end
+            or not Online(id) then
+            RestoreDiag.Log("Server", "treadmill", "ensure_blocked", { playerId = id, homeId = homeId,
+                generation = generation, reason = "home_or_economy_or_online_unavailable" }); return nil
+        end
         if state then return state end
         local resources = home:GetTreadmillResources(homeId)
-        if not resources or not resources.triggerId or not resources.positionId or not speed:GetSnapshot(id) then return nil end
+        if not resources or not resources.triggerId or not resources.positionId or not speed:GetSnapshot(id) then
+            Diag("ensure_blocked", id, nil, nil, "transform_resources_or_speed_missing"); return nil
+        end
         -- GetSnapshot首次建立速度状态时可能同步发布事件，由内层Ensure完成初始化。
         if rt.Players[id] then return rt.Players[id] end
         state = { homeId = homeId, generation = generation, level = 1, triggerId = resources.triggerId,
             positionId = resources.positionId, targetVersion = NextTarget(), training = false, lastRequestId = 0 }
         rt.Players[id] = state
         UpdatePreview(id, state)
-        if not rt.Dead[id] then CopyModel(id, state, 1, false) end
+        if not rt.Dead[id] then CopyModel(id, state, 1, false, nil, nil, true)
+        else Diag("ensure_blocked", id, state, nil, "player_dead") end
         return state
     end
     function rt:GetLevel(id)
@@ -275,16 +388,18 @@ function TreadmillService:Start(context)
             -- Current中所有引擎读取已完成；两份状态连续提交，中间没有等待/通知/引擎调用。
             local committed, publishGrowth = commitGrowth()
             if not committed then return false, publishGrowth end
-            local oldRoot = state.rootId
-            state.level = 1; state.rootId = token.rootId; state.operation = nil; state.targetVersion = NextTarget()
+            local oldRoot, oldLease = state.rootId, state.modelLease
+            state.level = 1; state.rootId = token.rootId; state.modelLease = token.modelLease
+            state.operation = nil; state.targetVersion = NextTarget()
             token.committed = true
             local notified = false
             return true, function()
                 if notified then return end; notified = true
                 local ok, err = pcall(publishGrowth)
                 if not ok then Log:PrintError("[Treadmill] 重生提交后成长通知失败", tostring(err)) end
-                Destroy(oldRoot)
+                if oldRoot ~= token.rootId then Destroy(oldRoot, "rebirth_replaced", oldLease) end
                 if Current(id, state) then
+                    CommitReplica(id, state, token)
                     UpdatePreview(id, state)
                     Send(id)
                     context.Events:Publish("TreadmillLevelChanged", { playerId = id, homeId = state.homeId,
@@ -340,8 +455,10 @@ function TreadmillService:Start(context)
     rt.Snapshot = Protect(function(_, _, id)
         if not rt.Ready or not Integer(id) then return end
         Ensure(id); Send(id)
+        home:SendTreadmillExperienceTexts(id)
+        SendReplicas(id)
     end)
-    rt.Leave = Protect(function(id) PrepareLeave(id); rt.Departed[id] = true; Drop(id); rt.Dead[id] = nil end)
+    rt.Leave = Protect(function(id) PrepareLeave(id); rt.Departed[id] = true; Drop(id, "player_leave"); rt.Dead[id] = nil end)
     rt.Enter = Protect(function(id) rt.Departed[id] = nil; if rt.Ready then Ensure(id) end end)
     rt.Death = Protect(function(id)
         rt.Dead[id] = true
@@ -352,7 +469,7 @@ function TreadmillService:Start(context)
         rt.Dead[id] = nil
         if not rt.Ready then return end
         local state = Ensure(id)
-        if state and not state.disabled and not state.rootId and not state.operation then CopyModel(id, state, 1, false) end
+        if state and not state.disabled and not state.rootId and not state.operation then CopyModel(id, state, 1, false, nil, nil, true) end
     end)
     rt.Bindings = {
         { Events.ON_CHARACTER_ENTER_SIGNAL_BOX, rt.EnterBox }, { Events.ON_CHARACTER_LEAVE_SIGNAL_BOX, rt.LeaveBox },
@@ -365,14 +482,21 @@ function TreadmillService:Start(context)
     System:BindNotify(messages.TreadmillAction, rt.Action)
     System:BindNotify(messages.TreadmillSnapshotRequest, rt.Snapshot)
     context.Events:Subscribe(self.Name, "HomeAssigned", Protect(function(data) rt.Departed[data.playerId] = nil; Ensure(data.playerId) end))
-    context.Events:Subscribe(self.Name, "HomeReleased", Protect(function(data) Drop(data.playerId); Send(data.playerId) end))
+    context.Events:Subscribe(self.Name, "HomeReleased", Protect(function(data) Drop(data.playerId, "home_released"); Send(data.playerId) end))
     context.Events:Subscribe(self.Name, "EconomyChanged", Protect(function(data) if rt.Ready then Ensure(data.playerId) end end))
     context.Events:Subscribe(self.Name, "PlayerSpeedChanged", Protect(function(data)
         if rt.Ready then Ensure(data.playerId); Send(data.playerId) end
     end))
     local function Initialize()
         if not rt.Ready or not home.TreadmillResourcesReady then return end
+        if PreplacedConfig.DiagnosticEnabled and not rt.PreplacedDiagnosed then
+            rt.PreplacedDiagnosed = true
+            local ok, err = pcall(PreplacedPool.Diagnose)
+            if not ok then pcall(function() Log:PrintError("[TreadmillPreplacedDiag] diagnostic_failed", tostring(err)) end) end
+        end
+        if preplaced then preplaced:Initialize() end
         for _, id in ipairs(Character:GetAllPlayerIds() or {}) do Ensure(id) end
+        StartNextInitial()
     end
     context.Events:Subscribe(self.Name, "HomeTreadmillResourcesReady", Protect(Initialize))
     context.Timers:AddTimer(self.Name, GameConfig.Runtime.ServerReadyDelaySeconds, Protect(function() rt.Ready = true; Initialize() end))
@@ -398,6 +522,9 @@ function TreadmillService:Start(context)
                 return { version = 1, level = state.level }
             end,
             Restore = function(id, data, done)
+                RestoreDiag.Log("Server", "treadmill", "restore_enter", function()
+                    return { playerId = id, hasData = data ~= nil, savedLevel = data and data.level }
+                end)
                 local level = 1
                 if data ~= nil then
                     if data.version ~= 1 then Log:PrintServerLog("[Persistence] version mismatch", id, "treadmill", tostring(data.version), 1) end
@@ -405,34 +532,38 @@ function TreadmillService:Start(context)
                 end
                 local homeId, generation = home:GetPlayerHome(id), economy:GetSessionGeneration(id)
                 local resources = homeId and home:GetTreadmillResources(homeId)
-                if not resources or not resources.triggerId or not resources.positionId or not generation then done(false, "treadmill_resources_missing"); return end
-                Drop(id)
+                if not resources or not resources.triggerId or not resources.positionId or not generation then
+                    Diag("restore_skipped", id, nil, nil, "treadmill_resources_missing"); done(false, "treadmill_resources_missing"); return
+                end
+                Drop(id, "restore_replace_state")
                 local state = { homeId = homeId, generation = generation, level = level, triggerId = resources.triggerId,
                     positionId = resources.positionId, targetVersion = NextTarget(), training = false, lastRequestId = 0 }
                 rt.Players[id], rt.Departed[id] = state, nil
-                RestoreDiagnostic("restore_begin", id, state, level)
-                CopyModel(id, state, level, false, function(ok, token, copyFailed)
+                local restoreOp = CopyModel(id, state, level, false, function(ok, token, copyFailed)
                     if not ok then
-                        RestoreDiagnostic("restore_failed", id, state, level, token)
                         if copyFailed then
                             if not Current(id, state) or state.operation ~= nil then done(false, "restore_expired"); return end
                             -- Keep the saved level and gameplay available when the copy callback fails.
-                            RestoreDiagnostic("restore_skipped", id, state, level, token)
+                            Diag("restore_model_missing_level_retained", id, state, nil, token)
                             done(true, function() Send(id); return true end)
                             return
                         end
                         done(false, token); return
                     end
                     if not Current(id, state) or state.operation ~= token then
-                        RestoreDiagnostic("restore_failed", id, state, level, "restore_expired")
-                        Destroy(token.rootId); done(false, "restore_expired"); return
+                        if not token.reusesCurrent then Destroy(token.rootId, "restore_expired", token.modelLease) end
+                        done(false, "restore_expired"); return
                     end
                     state.rootId, state.operation = token.rootId, nil
+                    state.modelLease = token.modelLease
                     token.committed = true
+                    CommitReplica(id, state, token)
                     UpdatePreview(id, state)
-                    RestoreDiagnostic("restore_complete", id, state, level)
                     done(true, function() Send(id); return true end)
-                end, true)
+                end, true, true)
+                restoreOp.onInitialFinished = function()
+                    if restoreOp.invalid or not Current(id, state) then done(false, "restore_expired") end
+                end
             end,
             Cleanup = function(id) rt.Leave(id) end,
         }))
@@ -443,9 +574,12 @@ function TreadmillService:Start(context)
     end
     rt.Cleanup = function()
         rt.Active = false
-        for id in pairs(rt.Players) do Drop(id) end
+        rt.InitialQueue = {}
+        rt.InitialCurrent = nil
+        if rt.InitialTimer then context.Timers:Remove(rt.InitialTimer); rt.InitialTimer = nil end
+        for id in pairs(rt.Players) do Drop(id, "module_stop") end
         local roots = {}; for root in pairs(rt.OwnedRoots) do roots[#roots + 1] = root end
-        for _, root in ipairs(roots) do Destroy(root) end
+        for _, root in ipairs(roots) do Destroy(root, "module_stop", rt.OwnedRoots[root]) end
     end
 end
 function TreadmillService:Stop(context)

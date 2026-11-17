@@ -245,6 +245,7 @@ function RebirthService:Start(context)
         Cancel(id); rt.Faulted[id] = nil; rt.Halted[id] = nil; rt.LastPaid[id] = nil; rt.Requests[id] = nil; rt.Opens[id] = nil; rt.Pending[id] = nil; rt.Dead[id] = nil; rt.Revives[id] = nil
     end)
     rt.Death = Protect(function(id) rt.Dead[id] = true; rt.Revives[id] = nil; Cancel(id); if rt.Ready then Send(id) end end)
+    context.Events:Subscribe(self.Name, "PlayerDataResetStarted", function(event) rt.Leave(event.playerId) end)
     rt.Revive = Protect(function(id)
         rt.Dead[id] = nil
         local generation = economy:GetSessionGeneration(id)

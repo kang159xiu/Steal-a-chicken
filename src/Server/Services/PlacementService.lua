@@ -1,5 +1,6 @@
 local GameConfig = require "Common.Config.GameConfig"
 local Decimal = require "Common.DecimalInteger"
+local RestoreDiag = require "Common.Debug.HomeModelRestoreDiag"
 
 local PlacementService = {
     Name = "PlacementService",
@@ -98,8 +99,16 @@ function PlacementService:Start(context)
         end
         modelVersion = modelVersion + 1
         local message = { source = "placement", playerId = playerId, version = modelVersion, models = models }
+        RestoreDiag.Log("Server", "placement", "models_send", function()
+            local ids = {}; for _, model in ipairs(models) do ids[#ids + 1] = tostring(model.rootId) end
+            local missing = 0
+            if house then for _, record in pairs(house.slots) do if not record.rootId then missing = missing + 1 end end end
+            return { playerId = playerId, homeId = homeId, recipient = recipient or "all", version = modelVersion,
+                count = #models, rootIds = table.concat(ids, ","), logicalCount = house and house.count or 0, missingModels = missing }
+        end)
         if recipient then System:SendToClient(recipient, context.NetMsg.Messages.ChickenModelState, message)
         else System:SendToAllClients(context.NetMsg.Messages.ChickenModelState, message) end
+        RestoreDiag.Log("Server", "placement", "models_sent", { playerId = playerId, homeId = homeId, version = modelVersion })
     end
     runtime.ModelSnapshotCallback = function(_, _, playerId)
         if not Active() or not runtime.Ready or not IsPositiveInteger(playerId) then return end
@@ -121,6 +130,7 @@ function PlacementService:Start(context)
 
     local function DestroyRoot(rootId, reason)
         if not rootId then return end
+        RestoreDiag.Log("Server", "placement", "model_destroy", { rootId = rootId, reason = reason })
         local ok, result = pcall(function() return context.ElementCopy:DestroyTree(rootId) end)
         if not ok or result ~= true then
             Log:PrintError("[PlacementService] 放置树清理失败，不重复结算",
@@ -421,7 +431,7 @@ function PlacementService:Start(context)
                     context.Timers:AddFrame(PlacementService.Name, GameConfig.Runtime.EngineOperationDelayFrames,
                         Protect(function() CommitPlacement(operation) end))
                 end)()
-            end)
+            end, nil, playerId)
     end)
 
     -- 面板入口与近身交互共用同一份家园记录；面板无需手持或碰撞目标。
@@ -677,7 +687,7 @@ function PlacementService:Start(context)
                         end)
                     end)
                     if not configured then Fail(configureError) end
-                end)
+                end, nil, playerId)
             end)
             if not ok then Fail(err) end
         end
@@ -723,6 +733,9 @@ function PlacementService:Start(context)
                 return { version = 2, slots = rows }
             end,
             Restore = function(id, data, done)
+                RestoreDiag.Log("Server", "placement", "restore_enter", function()
+                    return { playerId = id, hasData = data ~= nil, rowCount = data and data.slots and #data.slots }
+                end)
                 if data == nil then data = { version = 2, slots = {} } end
                 if data.version ~= 2 then Log:PrintServerLog("[Persistence] version mismatch", id, "placement", tostring(data.version), 2) end
                 if data.slots == nil then data.slots = {} end
@@ -749,6 +762,8 @@ function PlacementService:Start(context)
                 ClearHome(id, homeId)
                 local house, token = { playerId = id, slots = {}, count = 0 }, {}
                 runtime.Homes[homeId], restoreOperations[id] = house, token
+                RestoreDiag.Log("Server", "placement", "restore_rows", { playerId = id, homeId = homeId,
+                    operation = token, acceptedCount = #rows, rowCount = #data.slots })
                 local function Valid()
                     return Active() and restoreOperations[id] == token and runtime.Homes[homeId] == house
                         and home:IsOwner(id, homeId)
@@ -760,6 +775,9 @@ function PlacementService:Start(context)
                     local record = house.slots[row.slot]
                     DestroyRoot(record.rootId, "restore_model_failed")
                     record.rootId = nil
+                    RestoreDiag.Log("Server", "placement", "model_missing_record_retained", { playerId = id,
+                        homeId = homeId, operation = token, slot = row.slot, itemId = row.item.itemId,
+                        templateId = row.config.TemplateRootId, reason = reason })
                     Log:PrintError("[Persistence] placement model skipped; chicken retained", id, row.item.itemId, tostring(reason))
                     Next()
                 end
@@ -768,6 +786,11 @@ function PlacementService:Start(context)
                     index = index + 1
                     local row = rows[index]
                     if not row then
+                        RestoreDiag.Log("Server", "placement", "restore_complete", function()
+                            local missing = 0
+                            for _, record in pairs(house.slots) do if not record.rootId then missing = missing + 1 end end
+                            return { playerId = id, homeId = homeId, operation = token, logicalCount = house.count, missingModels = missing }
+                        end)
                         restoreOperations[id] = nil
                         done(true, function() PublishPlaced(id, homeId); return true end)
                         return
@@ -777,9 +800,20 @@ function PlacementService:Start(context)
                     local ok, err = pcall(function()
                         local position, rotation = Element:GetPosition(row.elementId), Element:GetRotation(row.elementId)
                         if not position or not rotation then Fail("slot_transform_missing"); return end
+                        RestoreDiag.Log("Server", "placement", "copy_requested", { playerId = id, homeId = homeId,
+                            operation = token, slot = row.slot, itemId = row.item.itemId, templateId = row.config.TemplateRootId })
                         context.ElementCopy:CopyTree(row.config.TemplateRootId, position, "RestorePlacement:" .. tostring(id), function(result)
+                            RestoreDiag.Log("Server", "placement", "copy_result", function()
+                                return { playerId = id, homeId = homeId, operation = token, slot = row.slot,
+                                    itemId = row.item.itemId, templateId = row.config.TemplateRootId,
+                                    rootId = result.rootId, success = result.success, reason = result.reason }
+                            end)
+                            if not Valid() then
+                                if result.success then DestroyRoot(result.rootId, "late_restore") end
+                                done(false, "restore_expired")
+                                return
+                            end
                             if not result.success then Fail(result.reason); return end
-                            if not Valid() then DestroyRoot(result.rootId, "late_restore"); return end
                             local rotated, why = pcall(function()
                                 Element:SetRotation(result.rootId, rotation, Element.COORDINATE.World)
                                 local scale = row.item.finalSellPrice / row.config.ChickenSellPrice
@@ -789,7 +823,7 @@ function PlacementService:Start(context)
                             -- 将完整树登记到待恢复house，离开/Stop在两帧等待期间也能清理。
                             house.slots[row.slot].rootId = result.rootId
                             context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
-                                if not Valid() then return end
+                                if not Valid() then done(false, "restore_expired"); return end
                                 local okTransform, transformError = pcall(function()
                                     local p, r = Element:GetPosition(result.rootId), Element:GetRotation(result.rootId)
                                     if not p or not r then error("restore_transform_missing") end
@@ -798,9 +832,12 @@ function PlacementService:Start(context)
                                     end
                                 end)
                                 if not okTransform then Fail(transformError); return end
+                                RestoreDiag.Sample("Server", "placement", "transform_verified_committed", { playerId = id,
+                                    homeId = homeId, operation = token, slot = row.slot, itemId = row.item.itemId,
+                                    rootId = result.rootId, templateId = row.config.TemplateRootId })
                                 Next()
                             end)
-                        end)
+                        end, nil, id)
                     end)
                     if not ok then Fail(err) end
                 end

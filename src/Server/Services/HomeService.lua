@@ -107,7 +107,22 @@ function HomeService:Start(context)
         return { homeId = homeId, triggerId = record.triggerId, positionId = record.positionId }
     end
 
-    function runtime:UpdateTreadmillExperienceText(homeId, level, amount, nextAmount)
+    function runtime:SendTreadmillExperienceTexts(playerId, homeId)
+        local homes = {}
+        for id, record in pairs(self.TreadmillResourcesByHome) do
+            if (not homeId or homeId == id) and record.experienceDisplayText then
+                homes[#homes + 1] = { homeId = id, version = record.experienceDisplayVersion,
+                    elementIds = record.experienceDisplayIds, text = record.experienceDisplayText }
+            end
+        end
+        local ok, reason = pcall(function()
+            if playerId then System:SendToClient(playerId, context.NetMsg.Messages.TreadmillWorldText, { homes = homes })
+            else System:SendToAllClients(context.NetMsg.Messages.TreadmillWorldText, { homes = homes }) end
+        end)
+        if not ok then Log:PrintError("[Treadmill] 世界文字同步失败，不重试", tostring(reason)) end
+    end
+
+    function runtime:UpdateTreadmillExperienceText(homeId, level, amount)
         local record = self.TreadmillResourcesByHome[homeId]
         if context.Services.HomeService ~= self or not self.Ready or not self.TreadmillResourcesReady or not record then return end
         local ids = record.experienceDisplayIds
@@ -115,22 +130,17 @@ function HomeService:Start(context)
         local ok, text = pcall(function()
             if amount == nil then
                 amount = GameConfig.TreadmillLevels[level].ExperiencePerTick
-                local nextLevel = GameConfig.TreadmillLevels[level + 1]
-                nextAmount = nextLevel and nextLevel.ExperiencePerTick
             end
-            return TreadmillText.FormatExperience(amount, nextAmount)
+            return TreadmillText.FormatExperience(amount)
         end)
         if not ok then
             Log:PrintError("[Treadmill] 增量文字格式失败，不重试", "homeId:", homeId, "level:", level, tostring(text))
             return
         end
         if record.experienceDisplayText == text then return end
-        record.experienceDisplayText = text -- 记录本次尝试；写入失败不自动重试。
-        for _, id in ipairs(ids) do
-            local written, err = pcall(function() FuncElement:SetTextBoardText(id, text) end)
-            if not written then Log:PrintError("[Treadmill] 增量文字写入失败，不重试", "homeId:", homeId,
-                "elementId:", id, "level:", level, tostring(err)) end
-        end
+        record.experienceDisplayText = text
+        record.experienceDisplayVersion = (record.experienceDisplayVersion or 0) + 1
+        self:SendTreadmillExperienceTexts(nil, homeId)
     end
 
     function runtime:IsOwner(playerId, homeId)
@@ -342,6 +352,19 @@ function HomeService:Start(context)
         })
     end
 
+    function runtime:ReturnAfterDataReset(playerId)
+        local homeId, returnPointId = self:GetPlayerHome(playerId), self:GetReturnPoint(playerId)
+        if not homeId then return false, "home_missing" end
+        CancelTeleport(playerId, "data_reset")
+        nextTeleportOperationId = nextTeleportOperationId + 1
+        local operation = { id = nextTeleportOperationId, playerId = playerId, homeId = homeId,
+            returnPointId = returnPointId, position = Element:GetPosition(returnPointId), source = "data_reset" }
+        self.TeleportOperationByPlayer[playerId] = operation
+        TeleportPlayer(operation)
+        local zone = context.Services.ZoneService
+        if zone then zone:SetPlayerArea(playerId, false, "data_reset") end
+        return true
+    end
     local function AssignPlayer(playerId, source)
         if not IsPositiveInteger(playerId) then
             error("家园分配收到无效玩家ID: " .. tostring(playerId))
@@ -495,6 +518,7 @@ function HomeService:Start(context)
         for _, playerId in ipairs(playerIds) do
             AssignPlayer(playerId, "startup_scan")
         end
+        context.Events:Publish("HomeInitialAssignmentsCompleted", {})
         Log:PrintServerLog("[HomeService] 正式家园模块已就绪",
             "homeCount:", #runtime.HomeIds,
             "onlinePlayerCount:", #playerIds)

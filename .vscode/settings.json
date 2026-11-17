@@ -50,5 +50,6 @@
     ],
     "emmylua.workspace.library": [
         "c:/Users/Administrator/.vscode/extensions/dreamhelper.dream-helper-1.4.7/res/lib"
-    ]
+    ],
+    "Lua.completion.showWord": "Disable"
 }

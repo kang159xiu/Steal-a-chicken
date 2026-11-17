@@ -20,6 +20,7 @@ local GameConfig = {
     },
 
     Persistence = {
+        ResetButtonId = 108852,
         SaveIntervalSeconds = 10,
         ProductionEnabled = true, -- 发布验证通过、完整接线后才启用。
         ProbeEnabled = false,
@@ -112,6 +113,7 @@ local GameConfig = {
     -- 第10步：跑步机和独立玩家速度成长。
     Treadmill = {
         DefaultLevel = 1, MaxLevel = 20,
+        InitialSpawnIntervalSeconds = 0.2,
         ExperienceTickSeconds = 0.2,
         TrainingPurpose = "跑步机触发盒", PositionPurpose = "跑步机",
         ExperienceDisplayPurpose = "跑步机速度",
@@ -187,27 +189,54 @@ local GameConfig = {
         } },
     },
 
-    RebirthPurchase = { ButtonId = 104520, Products = {
-        { Count = 0, GoodsId = 1, ItemId = "props1126663748431067517925467031" },
-        { Count = 1, GoodsId = 3, ItemId = "props1126663748431067517925467033" },
-        { Count = 2, GoodsId = 4, ItemId = "props1126663748431067517925467035" },
-        { Count = 3, GoodsId = 6, ItemId = "props1126663748431067517925467037" },
-        { Count = 4, GoodsId = 7, ItemId = "props1126663748431067517925467039" },
-        { Count = 5, GoodsId = 8, ItemId = "props11266637484310675179254670311" },
-        { Count = 6, GoodsId = 9, ItemId = "props11266637484310675179254670313" },
-        { Count = 7, GoodsId = 10, ItemId = "props11266637484310675179254670315" },
-        { Count = 8, GoodsId = 11, ItemId = "props11266637484310675179254670317" },
-        { Count = 9, GoodsId = 12, ItemId = "props11266637484310675179254670319" },
-        { Count = 10, GoodsId = 13, ItemId = "props11266637484310675179254670321" },
-        { Count = 11, GoodsId = 14, ItemId = "props11266637484310675179254670323" },
-        { Count = 12, GoodsId = 17, ItemId = "props11266637484310675179254670325" },
-        { Count = 13, GoodsId = 18, ItemId = "props11266637484310675179254670327" },
-        { Count = 14, GoodsId = 19, ItemId = "props11266637484310675179254670329" },
-        { Count = 15, GoodsId = 20, ItemId = "props1126663748431067517925467041" },
-        { Count = 16, GoodsId = 21, ItemId = "props1126663748431067517925467043" },
-        { Count = 17, GoodsId = 22, ItemId = "props1126663748431067517925467045" },
-        { Count = 18, GoodsId = 23, ItemId = "props1126663748431067517926376371" },
-        { Count = 19, GoodsId = 24, ItemId = "props1126663748431067517926377001" },
+    SignIn = { Rewards = {
+        { ButtonId = 109472, Coins = "100", Chickens = {} },
+        { ButtonId = 109542, Coins = "0", Chickens = { "Chicken9" } },
+        { ButtonId = 109551, Coins = "10000", Chickens = {} },
+        { ButtonId = 109560, Coins = "0", Chickens = { "Chicken13" } },
+        { ButtonId = 109569, Coins = "20000000", Chickens = {} },
+        { ButtonId = 109578, Coins = "100000000", Chickens = {} },
+        { ButtonId = 109533, Coins = "0", Chickens = { "Chicken23" } },
+    } },
+
+    GiftPacks = { Products = {
+        { Name = "新手礼包", GoodsId = 40, ItemId = "props1126663748431067517942806491", ButtonId = 109442,
+            Chickens = { "Chicken14" }, Coins = "10000", Experience = "2000" },
+        { Name = "史诗礼包", GoodsId = 41, ItemId = "props1126663748431067517942807601", ButtonId = 109376,
+            Chickens = { "Chicken9", "Chicken10" }, Coins = "0", Experience = "0" },
+        { Name = "宇宙礼包", GoodsId = 42, ItemId = "props1126663748431067517942809311", ButtonId = 109412,
+            Chickens = { "Chicken17", "Chicken18" }, Coins = "0", Experience = "0" },
+        { Name = "神龙礼包", GoodsId = 43, ItemId = "props1126663748431067517942809601", ButtonId = 109427,
+            Chickens = { "Chicken21", "Chicken22" }, Coins = "0", Experience = "0" },
+    } },
+
+    CoinPurchase = { MinimumBase = "500", Products = {
+        { GoodsId = 37, ItemId = "props1126663748431067517937822861", Multiplier = 2, TextId = 109201 },
+        { GoodsId = 38, ItemId = "props1126663748431067517937823231", Multiplier = 5, TextId = 109205 },
+        { GoodsId = 39, ItemId = "props1126663748431067517937823251", Multiplier = 10, TextId = 109209 },
+    } },
+
+    RebirthPurchase = { ButtonId = 104520, PriceTextId = 108944, Products = {
+        { Count = 0, DisplayPrice = 1, GoodsId = 1, ItemId = "props1126663748431067517925467031" },
+        { Count = 1, DisplayPrice = 3, GoodsId = 3, ItemId = "props1126663748431067517925467033" },
+        { Count = 2, DisplayPrice = 6, GoodsId = 4, ItemId = "props1126663748431067517925467035" },
+        { Count = 3, DisplayPrice = 9, GoodsId = 6, ItemId = "props1126663748431067517925467037" },
+        { Count = 4, DisplayPrice = 15, GoodsId = 7, ItemId = "props1126663748431067517925467039" },
+        { Count = 5, DisplayPrice = 25, GoodsId = 8, ItemId = "props11266637484310675179254670311" },
+        { Count = 6, DisplayPrice = 39, GoodsId = 9, ItemId = "props11266637484310675179254670313" },
+        { Count = 7, DisplayPrice = 49, GoodsId = 10, ItemId = "props11266637484310675179254670315" },
+        { Count = 8, DisplayPrice = 65, GoodsId = 11, ItemId = "props11266637484310675179254670317" },
+        { Count = 9, DisplayPrice = 79, GoodsId = 12, ItemId = "props11266637484310675179254670319" },
+        { Count = 10, DisplayPrice = 99, GoodsId = 13, ItemId = "props11266637484310675179254670321" },
+        { Count = 11, DisplayPrice = 129, GoodsId = 14, ItemId = "props11266637484310675179254670323" },
+        { Count = 12, DisplayPrice = 159, GoodsId = 17, ItemId = "props11266637484310675179254670325" },
+        { Count = 13, DisplayPrice = 199, GoodsId = 18, ItemId = "props11266637484310675179254670327" },
+        { Count = 14, DisplayPrice = 239, GoodsId = 19, ItemId = "props11266637484310675179254670329" },
+        { Count = 15, DisplayPrice = 279, GoodsId = 20, ItemId = "props1126663748431067517925467041" },
+        { Count = 16, DisplayPrice = 359, GoodsId = 21, ItemId = "props1126663748431067517925467043" },
+        { Count = 17, DisplayPrice = 399, GoodsId = 22, ItemId = "props1126663748431067517925467045" },
+        { Count = 18, DisplayPrice = 239, GoodsId = 23, ItemId = "props1126663748431067517926376371" },
+        { Count = 19, DisplayPrice = 269, GoodsId = 24, ItemId = "props1126663748431067517926377001" },
     } },
 
     Rebirth = {
@@ -574,7 +603,7 @@ local GameConfig = {
 
     Refresh = {
         Enabled = true,
-        IntervalSeconds = 30,--全局鸡刷新间隔
+        IntervalSeconds = 400,--全局鸡刷新间隔
         CountdownSeconds = 6,
         CountdownUiId = 100404,
         SignalName = "刷新中",
@@ -608,6 +637,7 @@ local GameConfig = {
                 { EggTypeId = "Egg4", Weight = 9 },
                 { EggTypeId = "Egg9", Weight = 1 },
             },
+
             Guardian = {
                 TrackDelaySeconds = 1,
                 InitialSpeed = 500,

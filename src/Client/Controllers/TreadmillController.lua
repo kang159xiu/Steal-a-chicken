@@ -2,6 +2,8 @@ local GameConfig = require "Common.Config.GameConfig"
 local SafeCall = require "Common.Core.SafeCall"
 local Decimal = require "Common.DecimalInteger"
 local TreadmillText = require "Common.TreadmillText"
+local ReplicaDiag = require "Common.Debug.TreadmillReplicaDiag"
+local RestoreDiag = require "Common.Debug.HomeModelRestoreDiag"
 local TreadmillController = { Name = "TreadmillController", FeatureFlag = "Treadmill", Dependencies = { "PromptController" } }
 local function Integer(value)
     return type(value) == "number" and value > 0 and value < math.huge and value == math.floor(value)
@@ -29,7 +31,8 @@ function TreadmillController:Start(context)
     if context.Side ~= "Client" then return end
     local c, messages = GameConfig.Treadmill, context.NetMsg.Messages
     local rt = { Active = true, Ready = false, Version = 0, BlockedTarget = 0, RenderVersion = 0,
-        RequestId = 0, Pending = {}, ResultRequests = {}, Copies = {}, UiFailed = {}, Frame = 0, Session = 0 }
+        RequestId = 0, Pending = {}, ResultRequests = {}, Copies = {}, UiFailed = {}, Frame = 0, Session = 0,
+        WorldTexts = {}, WorldTextWritten = {}, Replicas = {} }
     context.Services.TreadmillController = rt
     local function Active() return rt.Active and context.Services.TreadmillController == rt end
     local function Protect(callback)
@@ -40,6 +43,68 @@ function TreadmillController:Start(context)
         local ok, err = pcall(callback)
         if not ok then rt.UiFailed[id] = true; Log:PrintError("[TreadmillController] 控件失败，仅停对应表现", id, tostring(err)) end
         return ok
+    end
+    local function QueueReplica(entry)
+        if not rt.Ready or entry.cleared then return end
+        pcall(function()
+            context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+                if not Active() or rt.Replicas[entry.homeId] ~= entry then
+                    RestoreDiag.Log("Client", "treadmill", "sample_skipped", { homeId = entry.homeId, rootId = entry.rootId, reason = "stopped_or_old_model" }); return
+                end
+                RestoreDiag.Sample("Client", "treadmill", "after_settle_frames", { playerId = entry.playerId,
+                    homeId = entry.homeId, operation = entry.operation, templateId = entry.templateId, rootId = entry.rootId })
+                ReplicaDiag.Sample("Client", entry, "after_settle_frames")
+            end)
+        end)
+    end
+    rt.ReplicaCallback = function(_, data)
+        RestoreDiag.Log("Client", "treadmill", "models_received", function()
+            return { count = #data.models, ready = rt.Ready }
+        end)
+        pcall(function()
+            if not Active() or type(data) ~= "table" or type(data.models) ~= "table" then
+                RestoreDiag.Log("Client", "treadmill", "models_rejected", { reason = "inactive_or_invalid_payload" }); return
+            end
+            for _, entry in ipairs(data.models) do
+                local previous = rt.Replicas[entry.homeId]
+                if not previous or entry.version > previous.version then
+                    RestoreDiag.Log("Client", "treadmill", "model_accepted", { playerId = entry.playerId,
+                        homeId = entry.homeId, rootId = entry.rootId, version = entry.version, cleared = entry.cleared, ready = rt.Ready })
+                    rt.Replicas[entry.homeId] = entry
+                    QueueReplica(entry)
+                else
+                    RestoreDiag.Log("Client", "treadmill", "model_rejected", { homeId = entry.homeId,
+                        rootId = entry.rootId, version = entry.version, reason = "old_or_duplicate_version" })
+                end
+            end
+        end)
+    end
+    local function QueueWorldText(entry)
+        if not rt.Ready then return end
+        context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
+            if not Active() or rt.WorldTexts[entry.homeId] ~= entry then return end
+            for _, id in ipairs(entry.elementIds) do
+                if rt.WorldTextWritten[id] ~= entry.text then
+                    rt.WorldTextWritten[id] = entry.text -- 本次失败不自动重试。
+                    local ok, reason = pcall(function() FuncElement:SetTextBoardText(id, entry.text) end)
+                    if not ok then Log:PrintError("[Treadmill] 世界文字写入失败，不重试", "homeId:", entry.homeId,
+                        "elementId:", id, tostring(reason)) end
+                end
+            end
+        end)
+    end
+    rt.WorldTextCallback = function(_, data)
+        if not Active() or type(data) ~= "table" or type(data.homes) ~= "table" then return end
+        for _, entry in ipairs(data.homes) do
+            if type(entry) == "table" and Integer(entry.homeId) and Integer(entry.version)
+                and type(entry.text) == "string" and type(entry.elementIds) == "table" then
+                local previous = rt.WorldTexts[entry.homeId]
+                if not previous or entry.version > previous.version then
+                    rt.WorldTexts[entry.homeId] = entry
+                    QueueWorldText(entry)
+                end
+            end
+        end
     end
     local function Destroy(uid)
         if not rt.Copies[uid] or uid == c.FeedbackGroupId then return end
@@ -239,9 +304,13 @@ function TreadmillController:Start(context)
     rt.Bindings = { { Events.ON_CHARACTER_LEAVE_SIGNAL_BOX, rt.LeaveBox }, { Events.ON_PLAYER_PRELEAVE, rt.Leave } }
     System:BindNotify(messages.TreadmillState, rt.StateCallback)
     System:BindNotify(messages.TreadmillResult, rt.ResultCallback)
+    System:BindNotify(messages.TreadmillWorldText, rt.WorldTextCallback)
+    System:BindNotify(messages.TreadmillReplicaDiag, rt.ReplicaCallback)
     for _, binding in ipairs(rt.Bindings) do System:RegisterEvent(binding[1], binding[2]) end
     context.Timers:AddTimer(self.Name, GameConfig.Runtime.ClientSnapshotRequestDelaySeconds, Protect(function()
         rt.Ready = true
+        for _, entry in pairs(rt.WorldTexts) do QueueWorldText(entry) end
+        for _, entry in pairs(rt.Replicas) do QueueReplica(entry) end
         rt.ClickRegistered = Ui(c.UpgradeButtonId, function() UI:RegisterClicked(c.UpgradeButtonId, rt.Click) end)
         Show(false); Render(); QueueExperience(); SyncFeedbackSource()
         System:SendToServer(messages.TreadmillSnapshotRequest, {})
@@ -258,6 +327,8 @@ function TreadmillController:Start(context)
         rt.Active = false; rt.RenderVersion = rt.RenderVersion + 1
         InvalidateFeedbackSource(); rt.ExperienceDueFrame = nil
         rt.Pending = {}; rt.ResultRequests = {}; ClearCopies()
+        rt.WorldTexts = {}; rt.WorldTextWritten = {}
+        rt.Replicas = {}
         if rt.Ready then
             if rt.ClickRegistered then
                 local ok, err = pcall(function() UI:UnRegisterClicked(c.UpgradeButtonId, rt.Click) end)
@@ -273,6 +344,8 @@ function TreadmillController:Stop(context)
     rt.Cleanup()
     System:UnbindNotify(context.NetMsg.Messages.TreadmillState, rt.StateCallback)
     System:UnbindNotify(context.NetMsg.Messages.TreadmillResult, rt.ResultCallback)
+    System:UnbindNotify(context.NetMsg.Messages.TreadmillWorldText, rt.WorldTextCallback)
+    System:UnbindNotify(context.NetMsg.Messages.TreadmillReplicaDiag, rt.ReplicaCallback)
     for _, binding in ipairs(rt.Bindings) do System:UnregisterEvent(binding[1], binding[2]) end
     context.Timers:RemoveOwner(self.Name)
     context.Services.TreadmillController = nil

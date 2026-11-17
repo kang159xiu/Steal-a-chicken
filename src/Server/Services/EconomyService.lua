@@ -170,6 +170,31 @@ function EconomyService:Start(context)
             end
         end
     end
+    -- 内购协调方核票后提交固定金币；不应用售卖或永久收益倍率。
+    function runtime:PrepareCoinRewardCommit(playerId, generation, amount)
+        local allowed, reason = self:CanPurchaseMultiplier(playerId, generation)
+        if not allowed then return nil, reason end
+        local session, committed = self.Sessions[playerId], false
+        return function()
+            if committed or not Active() or self.Sessions[playerId] ~= session or not CanMutate(playerId) then
+                return false, "session_unavailable"
+            end
+            committed = true
+            session.balance = Decimal.Add(session.balance, amount)
+            return true, function()
+                local ok, err = pcall(function()
+                    context.Events:Publish("EconomyChanged", { playerId = playerId,
+                        sessionGeneration = generation, balance = session.balance })
+                end)
+                if not ok then Log:PrintError("[CoinPurchase] 金币提交后通知失败，不重发", playerId, tostring(err)) end
+                local persistence = context.Services.PersistenceService
+                if persistence and GameConfig.Persistence.ProductionEnabled then
+                    local saved, why = persistence:MarkDirty(playerId, "coin_purchase")
+                    if not saved then Log:PrintError("[CoinPurchase] 金币提交后保存调度失败，不重发", playerId, tostring(why)) end
+                end
+            end
+        end
+    end
     function runtime:BeginSaleBatch(playerId, generation)
         if not self:IsCurrent(playerId, generation) or not CanMutate(playerId) then return nil, "session_unavailable" end
         local session = self.Sessions[playerId]
@@ -259,8 +284,8 @@ function EconomyService:Start(context)
             return true
         end
     end
-    -- 两种重生共用：准备不改余额；协调方准备好其他模块后，在同一无等待提交段调用。
-    -- 新准备使旧闭包失效；闭包只清当前会话提交时的余额，不携带可回写的旧余额。
+    -- 两种重生共用：保留余额，在同一无等待提交段复核经济状态。
+    -- 新准备使旧闭包失效；提交后沿原经济通知刷新重生倍率后的售价。
     function runtime:PrepareRebirthReset(playerId, generation)
         if not self:IsCurrent(playerId, generation) then return nil, "session_unavailable" end
         if not CanMutate(playerId) then return nil, "persistence_not_ready" end
@@ -277,7 +302,6 @@ function EconomyService:Start(context)
             session.rebirthReset = nil
             if not CanMutate(playerId) then return false, "persistence_not_ready" end
             if session.saleBatch then return false, "sale_batch_busy" end
-            session.balance = "0"
             local notified = false
             return true, function()
                 if notified then return false, "already_notified" end
@@ -290,7 +314,7 @@ function EconomyService:Start(context)
                         sessionGeneration = generation, balance = session.balance })
                 end)
                 if not ok then
-                    Log:PrintError("[EconomyService] 重生清零后通知失败，不重试", "playerId:", playerId,
+                    Log:PrintError("[EconomyService] 重生经济通知失败，不重试", "playerId:", playerId,
                         "sessionGeneration:", generation, "error:", tostring(err))
                     return false, "notification_failed"
                 end

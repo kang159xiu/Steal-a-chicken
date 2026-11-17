@@ -35,6 +35,17 @@ function RebirthController:Start(context)
             if not Active() or rt.RenderVersion ~= token then return end
             local state = rt.State
             local valid = state and Decimal.IsValid(state.experience)
+            local priceText = ""
+            if valid then
+                priceText = state.expectedCount == c.MaxCount and "已满级"
+                    or tostring(paid.Products[state.expectedCount + 1].DisplayPrice)
+            end
+            if rt.PriceText ~= priceText then
+                Ui(paid.PriceTextId, function()
+                    UI:SetText({ paid.PriceTextId }, priceText, false)
+                    rt.PriceText = priceText
+                end)
+            end
             if not valid then
                 Ui(c.CountTextId, function() UI:SetText({ c.CountTextId }, "", false) end)
                 Ui(c.MultiplierTextId, function() UI:SetText({ c.MultiplierTextId }, "", false) end)

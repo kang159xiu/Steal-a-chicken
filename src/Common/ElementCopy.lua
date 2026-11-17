@@ -1,9 +1,10 @@
 -- 元件树复制工具：所有节点先在各自源位置生成并恢复附加关系，
--- 全树成功后同时等待 0.1 秒和 2 帧，只移动复制根到目标位置。
+-- 节点处理结束后沿用 0.1 秒和 2 帧等待，只移动复制根到目标位置。
 local ElementCopy = {}
 ElementCopy.__index = ElementCopy
 
 local NODE_TIMEOUT_SECONDS = 3
+local SERIAL_ROOT_TIMEOUT_SECONDS = 10
 local ROOT_MOVE_DELAY_SECONDS = 0.1
 local ROOT_MOVE_DELAY_FRAMES = 2
 local ROOT_MOVE_SETTLE_FRAMES = 2
@@ -105,17 +106,47 @@ function ElementCopy.New(side, timerRegistry)
         _replicate = side == "Server",
         _timers = timerRegistry,
         _operationSequence = 0,
+        _playerCopies = {},
     }, ElementCopy)
 end
 
+-- 初始化玩家数据时，只等待该玩家已发起的复制，不阻塞其他玩家。
+function ElementCopy:AfterPlayerCopies(playerId, completed)
+    local pending = self._playerCopies[playerId]
+    if not pending then completed(); return end
+    pending.cancelled = true
+    pending.completed = completed
+end
 
----复制完整元件树。
+---复制元件树；串行模式允许跳过失败子分支。
 ---@param sourceRootId number
 ---@param targetPos Engine.Vector
 ---@param debugName string
 ---@param onComplete fun(result: table)
-function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
+---@param serial boolean|nil 跑步机专用：逐节点复制，根等待10秒，子节点等待1秒，失败跳过整条分支。
+---@param playerId number|nil 仅玩家所属模型传入，用于数据初始化时等待已有复制收尾。
+function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete, serial, playerId)
     assert(type(onComplete) == "function", "ElementCopy onComplete 必须是 function")
+    local playerPending
+    if playerId then
+        local pending = self._playerCopies[playerId]
+        if not pending then pending = { count = 0 }; self._playerCopies[playerId] = pending end
+        pending.count = pending.count + 1
+        playerPending = pending
+        local notify = onComplete
+        onComplete = function(result)
+            SafeComplete(debugName, notify, result)
+            if pending.cancelled and not result.success and result.rootId then
+                local ok, reason = pcall(self.DestroyTree, self, result.rootId)
+                if not ok then Log:PrintError("[ElementCopy] 初始化清理失败副本", debugName, tostring(reason)) end
+            end
+            pending.count = pending.count - 1
+            if pending.count == 0 then
+                self._playerCopies[playerId] = nil
+                if pending.completed then pending.completed() end
+            end
+        end
+    end
 
     if type(debugName) ~= "string" or debugName == "" then
         local result = {
@@ -184,7 +215,7 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
         return nil
     end
     local function Diagnostic(stage, sourceId, copyId, detail)
-        if not diagnostic then return end
+        if not diagnostic or (stage ~= "timeout" and stage ~= "late_callback") then return end
         pcall(function()
             local now = DiagnosticTime()
             local elapsed = now and requestedAt[sourceId] and now - requestedAt[sourceId]
@@ -309,7 +340,46 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
         end
     end
 
+    local serialQueue = serial and { sourceRootId }
+    local serialIndex = 1
+    local serialSettled = serial and {}
     local SpawnNode
+    local function CleanSkippedCopy(copyId)
+        if not copyId then return end
+        local ok, err = pcall(function() self:DestroyTree(copyId) end)
+        if not ok then Log:PrintError("[ElementCopy] 跳过节点副本清理失败，不重试", debugName, copyId, tostring(err)) end
+    end
+    local function AdvanceSerial(sourceId, success)
+        serialSettled[sourceId] = true
+        if success then
+            for _, childSourceId in ipairs(nodes[sourceId].ChildIds) do
+                serialQueue[#serialQueue + 1] = childSourceId
+            end
+        end
+        serialIndex = serialIndex + 1
+        local nextSourceId = serialQueue[serialIndex]
+        if nextSourceId then
+            SpawnNode(nextSourceId, operation.SourceToCopy[nodes[nextSourceId].ParentSourceId])
+        else
+            FinishSuccessAfterDelay()
+        end
+    end
+    local function FailNode(sourceId, reason, copyId)
+        if not serial or sourceId == sourceRootId then FinishFailure(sourceId, reason); return end
+        if serialSettled[sourceId] or operation.Completed then return end
+        local timeoutId = operation.TimeoutIds[sourceId]
+        operation.TimeoutIds[sourceId], operation.PendingSourceIds[sourceId] = nil, nil
+        if timeoutId then self._timers:Remove(timeoutId) end
+        copyId = copyId or operation.SourceToCopy[sourceId]
+        operation.SourceToCopy[sourceId] = nil
+        for i, spawnedId in ipairs(operation.SpawnedIds) do
+            if spawnedId == copyId then table.remove(operation.SpawnedIds, i); break end
+        end
+        CleanSkippedCopy(copyId)
+        Log:PrintError("[ElementCopy] 子节点复制失败，跳过整条分支", debugName,
+            "sourceId:", sourceId, "reason:", tostring(reason))
+        AdvanceSerial(sourceId, false)
+    end
     SpawnNode = function(sourceId, parentCopyId)
         if operation.Completed then
             return
@@ -318,21 +388,24 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
         local node = nodes[sourceId]
         operation.PendingSourceIds[sourceId] = true
         if diagnostic then requestedAt[sourceId] = DiagnosticTime() end
-        Diagnostic("request", sourceId, nil)
 
+        local timeoutSeconds = NODE_TIMEOUT_SECONDS
+        if serial then
+            timeoutSeconds = sourceId == sourceRootId and SERIAL_ROOT_TIMEOUT_SECONDS or 1
+        end
         local timeoutOk, timeoutOrError = xpcall(function()
-            return self._timers:AddTimer(operation.Owner, NODE_TIMEOUT_SECONDS, function()
+            return self._timers:AddTimer(operation.Owner, timeoutSeconds, function()
                 operation.TimeoutIds[sourceId] = nil
                 if operation.Completed or not operation.PendingSourceIds[sourceId] then
                     return
                 end
                 Diagnostic("timeout", sourceId, nil)
-                FinishFailure(sourceId, "spawn_timeout_3s")
+                FailNode(sourceId, "spawn_timeout_" .. timeoutSeconds .. "s")
             end)
         end, Traceback)
         if not timeoutOk then
             operation.PendingSourceIds[sourceId] = nil
-            FinishFailure(sourceId, "timeout_timer_failed: " .. tostring(timeoutOrError))
+            FailNode(sourceId, "timeout_timer_failed: " .. tostring(timeoutOrError))
             return
         end
         operation.TimeoutIds[sourceId] = timeoutOrError
@@ -343,8 +416,16 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
                     callbackSeen[sourceId] = true
                     returnedCount = returnedCount + 1
                 end
-                Diagnostic(operation.Completed and "late_callback" or "callback", sourceId, copyId)
+                if operation.Completed or (serial and serialSettled[sourceId]) then Diagnostic("late_callback", sourceId, copyId) end
                 local callbackOk, callbackError = xpcall(function()
+                    if playerPending and playerPending.cancelled and operation.Completed then
+                        if copyId and copyId ~= operation.SourceToCopy[sourceId] then self:DestroyTree(copyId) end
+                        return
+                    end
+                    if serial and (operation.Completed or serialSettled[sourceId]) then
+                        if copyId ~= operation.SourceToCopy[sourceId] then CleanSkippedCopy(copyId) end
+                        return
+                    end
                     if operation.Completed then
                         Log:PrintWarning("[ElementCopy] 操作结束后收到回调，仅记录迟到实例", debugName,
                             "sourceId:", sourceId, "copyId:", tostring(copyId))
@@ -359,7 +440,7 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
                     operation.PendingSourceIds[sourceId] = nil
 
                     if not copyId then
-                        FinishFailure(sourceId, "spawn_callback_empty_id")
+                        FailNode(sourceId, "spawn_callback_empty_id")
                         return
                     end
 
@@ -373,6 +454,10 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
                     end
 
                     operation.RemainingCount = operation.RemainingCount - 1
+                    if serial then
+                        AdvanceSerial(sourceId, true)
+                        return
+                    end
                     for _, childSourceId in ipairs(node.ChildIds) do
                         SpawnNode(childSourceId, copyId)
                     end
@@ -382,11 +467,10 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
                 end, Traceback)
 
                 if not callbackOk and not operation.Completed then
-                    FinishFailure(sourceId, "spawn_callback_error: " .. tostring(callbackError))
+                    FailNode(sourceId, "spawn_callback_error: " .. tostring(callbackError), copyId)
                 end
             end, node.Position, node.Rotation, node.Scale, self._replicate)
         end, Traceback)
-        Diagnostic("call_return", sourceId, nil, spawnOk and "no_exception" or spawnError)
 
         if not spawnOk and not operation.Completed then
             local timeoutId = operation.TimeoutIds[sourceId]
@@ -395,7 +479,7 @@ function ElementCopy:CopyTree(sourceRootId, targetPos, debugName, onComplete)
                 self._timers:Remove(timeoutId)
             end
             operation.PendingSourceIds[sourceId] = nil
-            FinishFailure(sourceId, "spawn_call_error: " .. tostring(spawnError))
+            FailNode(sourceId, "spawn_call_error: " .. tostring(spawnError))
         end
     end
 

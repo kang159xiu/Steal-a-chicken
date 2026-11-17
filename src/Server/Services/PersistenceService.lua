@@ -1,6 +1,7 @@
 -- 双组影子分段；提交目录只是应用层协议，不是平台原子事务/持久落盘确认。
 local Config = require "Common.Config.GameConfig"
 local Codec = require "Common.PersistenceCodec"
+local RestoreDiag = require "Common.Debug.HomeModelRestoreDiag"
 local PersistenceService = { Name = "PersistenceService", FeatureFlag = "Persistence", Dependencies = {} }
 local function Integer(n) return type(n) == "number" and n >= 1 and n <= 9007199254740991 and n == math.floor(n) end
 local function Keys(prefix, separator, segmentCount)
@@ -283,9 +284,52 @@ function PersistenceService:Start(context)
         adapterOrder[#adapterOrder + 1] = "tutorial"
         restoreOrder[#restoreOrder + 1] = "tutorial"
     end
+    if require("Common.Config.FeatureFlags").Values.GiftPacks then
+        adapterOrder[#adapterOrder + 1] = "giftPacks"
+        restoreOrder[#restoreOrder + 1] = "giftPacks"
+    end
+    if require("Common.Config.FeatureFlags").Values.SignIn then
+        adapterOrder[#adapterOrder + 1] = "signIn"
+        restoreOrder[#restoreOrder + 1] = "signIn"
+    end
     local adapters, productionStates, loadTriggers = {}, {}, {}
     local sealed, startupReady = false, false
+    local homeLoads, currentHomeLoad, assignmentsReady = {}, nil, false
+    local PumpHomeLoads
+    runtime.InitialHomeLoadsCompleted = false
+    local function FinishHomeLoad(job, reason)
+        if currentHomeLoad ~= job then return end
+        RestoreDiag.Log("Server", "home_queue", "finished", { playerId = job.playerId, homeId = job.homeId, reason = reason })
+        currentHomeLoad = nil
+        PumpHomeLoads()
+    end
+    PumpHomeLoads = function()
+        if not Active() or not assignmentsReady or not startupReady or currentHomeLoad then return end
+        local home = context.Services.HomeService
+        for _, homeId in ipairs(Config.Home.RootElementIds) do
+            local job = homeLoads[homeId]
+            if job then
+                if not Online(job.playerId) or not home:IsOwner(job.playerId, homeId) then
+                    homeLoads[homeId] = nil
+                else
+                    if not job.ready then return end
+                    homeLoads[homeId], currentHomeLoad = nil, job
+                    RestoreDiag.Log("Server", "home_queue", "started", { playerId = job.playerId, homeId = homeId })
+                    local ok, reason = runtime:LoadPlayer(job.playerId, true, function(result) FinishHomeLoad(job, result) end)
+                    if not ok or reason == "session_already_loading_or_ready" then FinishHomeLoad(job, reason) end
+                    return
+                end
+            end
+        end
+        if not runtime.InitialHomeLoadsCompleted then
+            runtime.InitialHomeLoadsCompleted = true
+            RestoreDiag.Log("Server", "home_queue", "initial_completed", {})
+            context.Events:Publish("HomeInitialLoadsCompleted", {})
+        end
+    end
     local statusVersion = 0
+    local resetCleaning = {}
+    local BeginReset
     local function SendStatus(playerId, state, reason, ready, source)
         statusVersion = statusVersion + 1
         local record = productionStates[playerId]
@@ -304,7 +348,7 @@ function PersistenceService:Start(context)
     System:BindNotify(context.NetMsg.Messages.PersistenceSnapshotRequest, runtime.StateSnapshotCallback)
     local function Status(record, state, reason)
         record.state, record.reason = state, reason
-        SendStatus(record.playerId, state, reason, record.ready == true and not record.frozen, "status_change")
+        SendStatus(record.playerId, state, reason, runtime:IsReady(record.playerId), "status_change")
         if state:find("failed", 1, true) then
             Log:PrintServerLog("[Persistence] state", tostring(record.playerId), tostring(state), tostring(reason))
         elseif state == "ready" and (reason == "restored" or reason == "new_player") then
@@ -312,7 +356,7 @@ function PersistenceService:Start(context)
                 "success:", true, "reason:", reason)
         end
         context.Events:Publish("PersistenceStateChanged", { playerId = record.playerId, state = state,
-            reason = tostring(reason), ready = record.ready == true and not record.frozen, generation = record.generation })
+            reason = tostring(reason), ready = runtime:IsReady(record.playerId), generation = record.generation })
     end
     function runtime:RegisterAdapter(name, adapter)
         if sealed then return false, "adapters_sealed" end
@@ -330,7 +374,7 @@ function PersistenceService:Start(context)
     end
     function runtime:IsReady(playerId)
         local record = productionStates[playerId]
-        return Active() and c.ProductionEnabled and sealed and record ~= nil and record.ready == true and not record.frozen
+        return Active() and c.ProductionEnabled and sealed and record ~= nil and record.ready == true and not record.frozen and not record.resetJob
     end
     function runtime:GetState(playerId)
         local record = productionStates[playerId]
@@ -368,6 +412,11 @@ function PersistenceService:Start(context)
         local function Done(ok, reason)
             if not Active() or productionStates[record.playerId] ~= record then return end
             record.saving = false
+            if record.resetJob and record.resetJob.phase == "waiting_save" then
+                if ok then record.savedVersion = capturedVersion; record.pendingText = nil end
+                BeginReset(record)
+                return
+            end
             if ok then
                 record.savedVersion = capturedVersion
                 if record.pendingText == text and record.pendingVersion == capturedVersion then record.pendingText = nil end
@@ -388,8 +437,15 @@ function PersistenceService:Start(context)
             if ok and not record.frozen and record.immediateVersion > record.savedVersion then QueueSave(record) end
             if record.nextLoad then
                 record.nextLoad = nil
-                if ok and not record.leaveExportError then runtime:LoadPlayer(record.playerId, true)
-                else Status(record, "previous_session_save_failed", reason) end
+                local completed = record.nextLoadCompleted
+                record.nextLoadCompleted = nil
+                if ok and not record.leaveExportError then
+                    local started, why = runtime:LoadPlayer(record.playerId, true, completed)
+                    if not started and completed then completed(why) end
+                else
+                    Status(record, "previous_session_save_failed", reason)
+                    if completed then completed(reason) end
+                end
             end
         end
         local ok, reason = WriteEncoded(record.playerId, record.generation, text, Done)
@@ -424,6 +480,20 @@ function PersistenceService:Start(context)
     end
     function runtime:PrepareLeave(playerId)
         local record = productionStates[playerId]
+        if resetCleaning[playerId] then return true, "reset_cleanup" end
+        if record and record.resetJob then
+            local job = record.resetJob
+            record.resetJob = nil
+            if job.phase == "waiting_save" then
+                record.ready = true
+            elseif job.phase ~= "saving" then
+                record.frozen, record.ready = true, false
+                for _, name in ipairs(adapterOrder) do
+                    if adapters[name].Cleanup then adapters[name].Cleanup(playerId) end
+                end
+                return true, "reset_cancelled_on_leave"
+            end
+        end
         if not c.ProductionEnabled or not record then return false, "no_loaded_session" end
         if record.frozen then return true, "already_frozen" end
         local wasReady = record.ready == true
@@ -454,35 +524,30 @@ function PersistenceService:Start(context)
         end
         return SaveRecord(record)
     end
-    function runtime:LoadPlayer(playerId, archiveReady)
-        if not Active() or not c.ProductionEnabled or not sealed or not startupReady or archiveReady ~= true then return false, "load_gate_closed" end
-        if not Online(playerId) then return false, "player_not_online" end
-        local previous = productionStates[playerId]
-        if previous and previous.state == "load_failed" and not previous.frozen then return false, "load_failed_session_locked" end
-        if previous and previous.frozen then
-            if previous.saving then previous.nextLoad = true; return true, "waiting_previous_save" end
-            if previous.leaveExportError then return false, previous.leaveExportError end
-            if previous.pendingText then
-                return SaveRecord(previous, function(ok) if ok then runtime:LoadPlayer(playerId, true) end end)
-            end
-            if previous.state == "leave_export_failed" or previous.state == "previous_session_save_failed" then return false, previous.state end
-        elseif previous and (previous.loading or previous.ready) then return true, "session_already_loading_or_ready" end
-        local generation, beginError = self:BeginSession(playerId, true)
-        if not generation then return false, beginError end
-        local record = { playerId = playerId, generation = generation, loading = true, ready = false,
-            changeVersion = 0, savedVersion = 0, immediateVersion = 0 }
+    local function RestoreRecord(record, snapshot, completed)
+        local playerId, generation = record.playerId, record.generation
         local archiveSession = runtime.Sessions[playerId]
-        productionStates[playerId] = record
-        Status(record, "loading", "archive_read")
-        local snapshot, readError = self:ReadSnapshot(playerId, generation)
-        if not snapshot and readError ~= "not_found" then record.loading = false; Status(record, "load_failed", readError); return false, readError end
         local index, notifications = 1, {}
+        local notificationNames = {}
         local function RestoreNext()
-            if not Active() or productionStates[playerId] ~= record or record.frozen or runtime.Sessions[playerId] ~= archiveSession then return end
+            if not Active() or productionStates[playerId] ~= record or record.frozen or runtime.Sessions[playerId] ~= archiveSession then
+                if completed then completed("restore_cancelled") end
+                return
+            end
             local name = restoreOrder[index]
             if not name then
-                for _, notify in ipairs(notifications) do
+                for notifyIndex, notify in ipairs(notifications) do
+                    local notifyName = notificationNames[notifyIndex]
+                    if notifyName == "treadmill" or notifyName == "placement" then
+                        RestoreDiag.Log("Server", notifyName, "notify_start", { playerId = playerId, generation = generation })
+                    end
                     local ok, result, reason = pcall(notify)
+                    if notifyName == "treadmill" or notifyName == "placement" then
+                        RestoreDiag.Log("Server", notifyName, "notify_end", function()
+                            return { playerId = playerId, generation = generation, success = ok and result ~= false,
+                                reason = ok and reason or result }
+                        end)
+                    end
                     if not ok or result == false then Log:PrintError("[Persistence] restore notify skipped", playerId, tostring(ok and reason or result)) end
                 end
                 record.loading, record.ready = false, true
@@ -492,27 +557,169 @@ function PersistenceService:Start(context)
                     context.Events:Publish("PersistenceReady", { playerId = playerId, generation = generation, restored = snapshot ~= nil })
                 end)
                 if not readyOk then Log:PrintError("[Persistence] ready event skipped", playerId, tostring(readyError)) end
-                if not snapshot then runtime:MarkDirty(playerId, "new_player_initial_snapshot") end
-                if snapshot then runtime:MarkDeferred(playerId, "restored_snapshot") end
+                if not record.resetJob and not snapshot then runtime:MarkDirty(playerId, "new_player_initial_snapshot") end
+                if not record.resetJob and snapshot then runtime:MarkDeferred(playerId, "restored_snapshot") end
+                if completed then completed("restored") end
                 return
             end
             local called = false
             local function Done(ok, result)
-                if called or not Active() or productionStates[playerId] ~= record or record.frozen or runtime.Sessions[playerId] ~= archiveSession then return end
+                if called then return end
                 called = true
+                if not Active() or productionStates[playerId] ~= record or record.frozen or runtime.Sessions[playerId] ~= archiveSession then
+                    if name == "treadmill" or name == "placement" then
+                        RestoreDiag.Log("Server", name, "restore_callback_skipped", { playerId = playerId,
+                            generation = generation, frozen = record.frozen, reason = "restore_invalid" })
+                    end
+                    if completed then completed("restore_cancelled") end
+                    return
+                end
+                if name == "treadmill" or name == "placement" then
+                    RestoreDiag.Log("Server", name, "restore_end", function()
+                        return { playerId = playerId, generation = generation, success = ok,
+                            hasNotification = type(result) == "function", reason = type(result) ~= "function" and result or nil }
+                    end)
+                end
                 if ok ~= true then Log:PrintError("[Persistence] restore skipped", playerId, name, tostring(result)) end
-                if type(result) == "function" then notifications[#notifications + 1] = result end
+                if type(result) == "function" then
+                    notifications[#notifications + 1] = result
+                    notificationNames[#notifications] = name
+                end
                 index = index + 1
                 RestoreNext()
             end
             local component
             if snapshot ~= nil then component = snapshot[name] end
+            if name == "treadmill" or name == "placement" then
+                RestoreDiag.Log("Server", name, "restore_start", { playerId = playerId,
+                    generation = generation, hasData = component ~= nil })
+            end
             local ok, err = pcall(adapters[name].Restore, playerId, component, Done)
             if not ok then Done(false, err) end
         end
         RestoreNext()
+    end
+    function runtime:LoadPlayer(playerId, archiveReady, completed)
+        if not Active() or not c.ProductionEnabled or not sealed or not startupReady or archiveReady ~= true then return false, "load_gate_closed" end
+        if not Online(playerId) then return false, "player_not_online" end
+        local previous = productionStates[playerId]
+        if previous and previous.state == "load_failed" and not previous.frozen then return false, "load_failed_session_locked" end
+        if previous and previous.frozen then
+            if previous.saving then previous.nextLoad = true; previous.nextLoadCompleted = completed; return true, "waiting_previous_save" end
+            if previous.leaveExportError then return false, previous.leaveExportError end
+            if previous.pendingText then
+                return SaveRecord(previous, function(ok, reason)
+                    if ok then
+                        local started, why = runtime:LoadPlayer(playerId, true, completed)
+                        if not started and completed then completed(why) end
+                    elseif completed then completed(reason) end
+                end)
+            end
+            if previous.state == "leave_export_failed" or previous.state == "previous_session_save_failed" then return false, previous.state end
+        elseif previous and (previous.loading or previous.ready) then return true, "session_already_loading_or_ready" end
+        local generation, beginError = self:BeginSession(playerId, true)
+        if not generation then return false, beginError end
+        local record = { playerId = playerId, generation = generation, loading = true, ready = false,
+            changeVersion = 0, savedVersion = 0, immediateVersion = 0 }
+        productionStates[playerId] = record
+        Status(record, "loading", "archive_read")
+        local snapshot, readError = self:ReadSnapshot(playerId, generation)
+        if not snapshot and readError ~= "not_found" then record.loading = false; Status(record, "load_failed", readError); return false, readError end
+        RestoreRecord(record, snapshot, completed)
         return true, "restore_started"
     end
+    local function ResetResult(playerId, requestId, success, reason, pending)
+        System:SendToClient(playerId, context.NetMsg.Messages.PersistenceResetResult,
+            { requestId = requestId, success = success, reason = tostring(reason), pending = pending == true })
+    end
+    BeginReset = function(record)
+        local playerId, job = record.playerId, record.resetJob
+        if not job or not Active() or not Online(playerId) then return end
+        job.phase = "cleaning"
+        Log:PrintServerLog("[Persistence] reset_started", "playerId:", playerId, "requestId:", job.requestId)
+        record.ready, record.frozen = false, true
+        record.pendingText, record.pendingVersion, record.saveFinalAfterCurrent = nil, nil, nil
+        record.failedVersion, record.leaveExportError = nil, nil
+        resetCleaning[playerId] = true
+        context.Events:Publish("PlayerDataResetStarted", { playerId = playerId })
+        local theft = context.Services.TheftService
+        if theft then theft:ResetPlayer(playerId) end
+        -- 仅调用模块清理；resetCleaning阻止清理入口转入退出导出／保存。
+        for _, name in ipairs(adapterOrder) do
+            if adapters[name].Cleanup then
+                local ok, reason = pcall(adapters[name].Cleanup, playerId)
+                if not ok then Log:PrintError("[Persistence] reset cleanup failed", playerId, name, tostring(reason)) end
+            end
+        end
+        resetCleaning[playerId] = nil
+        local function CurrentReset()
+            return Active() and Online(playerId) and productionStates[playerId] == record and record.resetJob == job
+        end
+        local function RestoreInitial()
+            if not CurrentReset() then return end
+            context.ElementCopy:AfterPlayerCopies(playerId, function()
+                if not CurrentReset() then return end
+                -- 保留原两帧落地等待，让旧模型清理与附加解除完成。
+                context.Timers:AddFrame(self.Name, Config.Runtime.EngineOperationDelayFrames, function()
+                    if not CurrentReset() then return end
+                    job.phase = "restoring"
+                    record.frozen, record.loading = false, true
+                    local initial = { version = 1, inventory = { version = 2, items = {} },
+                        economy = { version = 2, balance = "0", coinMultiplier = 1 },
+                        speed = { version = 7, redeemedMask = job.redeemedMask }, giftPacks = job.giftPacks,
+                        signIn = job.signIn }
+                    RestoreRecord(record, initial, function(reason)
+                        if not CurrentReset() then return end
+                        if reason == "restore_cancelled" then return end
+                        local home = context.Services.HomeService
+                        local moved, moveResult, moveError = pcall(function() return home:ReturnAfterDataReset(playerId) end)
+                        if not moved or moveResult == false then
+                            Log:PrintError("[Persistence] reset home teleport failed", playerId, tostring(moved and moveError or moveResult))
+                        end
+                        job.phase = "saving"
+                        local text, exportError = ExportRecord(record)
+                        local function Finished(ok, saveError)
+                            if not CurrentReset() then return end
+                            record.resetJob = nil
+                            Log:PrintServerLog("[Persistence] reset_finished", "playerId:", playerId,
+                                "requestId:", job.requestId, "success:", ok, "reason:", tostring(saveError))
+                            Status(record, ok and "ready" or "save_failed", saveError or "data_initialized")
+                            context.Events:Publish("PersistenceReady", { playerId = playerId, generation = record.generation, restored = false })
+                            ResetResult(playerId, job.requestId, ok, saveError or "data_initialized")
+                        end
+                        record.changeVersion = record.changeVersion + 1
+                        record.immediateVersion = record.changeVersion
+                        if not text then record.failedVersion = record.changeVersion; Finished(false, exportError); return end
+                        record.pendingText, record.pendingVersion = text, record.changeVersion
+                        SaveRecord(record, Finished)
+                    end)
+                end)
+            end)
+        end
+        local hotbar = context.Services.HotbarService
+        if hotbar then hotbar:ResetPlayer(playerId, RestoreInitial) else RestoreInitial() end
+    end
+    runtime.ResetCallback = function(_, message, playerId)
+        if type(message) ~= "table" or not Integer(message.requestId) then return end
+        local record = productionStates[playerId]
+        if not runtime:IsReady(playerId) then
+            ResetResult(playerId, message.requestId, false, record and record.resetJob and "reset_in_progress" or "player_not_ready")
+            return
+        end
+        if record.lastResetRequestId and message.requestId <= record.lastResetRequestId then return end
+        record.lastResetRequestId = message.requestId
+        local growth = context.Services.PlayerSpeedService:GetSnapshot(playerId)
+        record.resetJob = { requestId = message.requestId, phase = "waiting_save", redeemedMask = growth.redeemedMask }
+        local packs = context.Services.GiftPackService
+        if packs then record.resetJob.giftPacks = packs:ExportPurchased(playerId) end
+        local signIn = context.Services.SignInService
+        if signIn then record.resetJob.signIn = signIn:ExportSnapshot(playerId) end
+        if record.saveTimer then context.Timers:Remove(record.saveTimer); record.saveTimer = nil end
+        Status(record, "initializing", "data_reset")
+        ResetResult(playerId, message.requestId, false, "initializing", true)
+        if not record.saving then BeginReset(record) end
+    end
+    System:BindNotify(context.NetMsg.Messages.PersistenceResetRequest, runtime.ResetCallback)
     for _, entry in ipairs({ { "inventory", "InventoryService" }, { "economy", "EconomyService" } }) do
         local name, serviceName = entry[1], entry[2]
         runtime:RegisterAdapter(name, {
@@ -550,7 +757,25 @@ function PersistenceService:Start(context)
                 end
             end
         end)
-        context.Timers:AddTimer(self.Name, Config.Runtime.ServerReadyDelaySeconds, function() if Active() then startupReady = true end end)
+        context.Events:Subscribe(self.Name, "HomeAssigned", function(event)
+            if not homeLoads[event.homeId] then
+                homeLoads[event.homeId] = { playerId = event.playerId, homeId = event.homeId, ready = false }
+                RestoreDiag.Log("Server", "home_queue", "enqueued", { playerId = event.playerId, homeId = event.homeId })
+            end
+        end)
+        context.Events:Subscribe(self.Name, "HomeInitialAssignmentsCompleted", function()
+            assignmentsReady = true
+            PumpHomeLoads()
+        end)
+        context.Events:Subscribe(self.Name, "HomeReleased", function(event)
+            local job = homeLoads[event.homeId]
+            if job and job.playerId == event.playerId then homeLoads[event.homeId] = nil end
+            loadTriggers[event.playerId] = nil
+            PumpHomeLoads()
+        end)
+        context.Timers:AddTimer(self.Name, Config.Runtime.ServerReadyDelaySeconds, function()
+            if Active() then startupReady = true; PumpHomeLoads() end
+        end)
         context.Events:Subscribe(self.Name, "HomeTeleportCalled", function(event)
             local home = context.Services.HomeService
             local trigger = { playerId = event.playerId, homeId = event.homeId, operationId = event.operationId, home = home }
@@ -561,7 +786,13 @@ function PersistenceService:Start(context)
             end
             context.Timers:AddFrame(self.Name, 2, function()
                 if not CurrentTrigger() then return end
-                context.Timers:AddTimer(self.Name, 1, function() if CurrentTrigger() then runtime:LoadPlayer(event.playerId, true) end end)
+                context.Timers:AddTimer(self.Name, 1, function()
+                    if not CurrentTrigger() then return end
+                    local job = homeLoads[event.homeId]
+                    if not job or job.playerId ~= event.playerId then return end
+                    job.ready = true
+                    PumpHomeLoads()
+                end)
             end)
         end)
     end
@@ -739,6 +970,10 @@ function PersistenceService:Start(context)
         runtime.Sessions[playerId], runtime.Busy[playerId], runtime.Dirty[playerId] = nil, nil, nil
     end
     System:RegisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback)
+    runtime.ClearHomeLoadQueue = function()
+        homeLoads, currentHomeLoad = {}, nil
+        loadTriggers = {}
+    end
     if c.ProbeEnabled then
         context.Events:Subscribe(self.Name, "HomeTeleportCalled", function(event)
             local home = context.Services.HomeService
@@ -782,10 +1017,12 @@ function PersistenceService:Stop(context)
     local runtime = context.Services.PersistenceService
     if not runtime then return end
     runtime.Active = false
+    runtime.ClearHomeLoadQueue()
     context.Events:UnsubscribeOwner(self.Name)
     runtime.Sessions, runtime.Busy, runtime.Dirty = {}, {}, {}
     System:UnregisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.LeaveCallback)
     System:UnbindNotify(context.NetMsg.Messages.PersistenceSnapshotRequest, runtime.StateSnapshotCallback)
+    System:UnbindNotify(context.NetMsg.Messages.PersistenceResetRequest, runtime.ResetCallback)
     context.Timers:RemoveOwner(self.Name)
     context.Services.PersistenceService = nil
 end

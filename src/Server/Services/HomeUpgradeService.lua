@@ -281,6 +281,7 @@ function HomeUpgradeService:Start(context)
                 return { version = 2, level = state.level, unlockedSlots = SlotNumbers(state) }
             end,
             Restore = function(id, data, done)
+                runtime.Departed[id] = nil
                 local level, unlocked = 1, InitialSlots()
                 if data ~= nil then
                     if data.version ~= 2 then Log:PrintServerLog("[Persistence] version mismatch", id, "home", tostring(data.version), 2) end

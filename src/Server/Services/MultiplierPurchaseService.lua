@@ -163,6 +163,7 @@ function MultiplierPurchaseService:Start(context)
         for _, kind in ipairs(kinds) do for _, row in ipairs(config[kind].Products) do if row.ItemId == itemId then Wake(id); return end end end
     end)
     rt.Leave = Protect(function(id) rt.Halted[id] = nil; rt.LastCommit[id] = nil; rt.Pending[id] = nil; rt.Opens[id] = nil; rt.Dead[id] = nil; rt.Revives[id] = nil; rt.Sent[id] = nil end)
+    context.Events:Subscribe(self.Name, "PlayerDataResetStarted", function(event) rt.Leave(event.playerId) end)
     rt.Death = Protect(function(id) rt.Dead[id] = true; rt.Revives[id] = nil end)
     rt.Revive = Protect(function(id)
         rt.Dead[id] = nil

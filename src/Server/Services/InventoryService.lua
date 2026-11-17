@@ -1,4 +1,5 @@
 local GameConfig = require "Common.Config.GameConfig"
+local Decimal = require "Common.DecimalInteger"
 
 -- 临时定向诊断：不读取额外业务状态，日志故障不进入资产流程。
 local function ObtainedDiag(stage, playerId, chickenType, itemId, inventoryGeneration, archiveGeneration, reason)
@@ -182,8 +183,85 @@ function InventoryService:Start(context)
         local count = data and #(kind == "Chicken" and data.ChickenOrder or data.EggOrder) or 0
         if removeCount > count then return false, "invalid_capacity_change" end
         local limit = kind == "Chicken" and GameConfig.InventoryCapacity.Chickens or GameConfig.InventoryCapacity.Eggs
-        if count - removeCount + addCount > limit then return false, "inventory_capacity_full" end
+        if kind == "Egg" and count - removeCount + addCount > limit then return false, "inventory_capacity_full" end
         return true
+    end
+    -- 所有鸡入库共用：只从库存中按原获得顺序腾出必要位置，不出售家园鸡。
+    local function OverflowChickens(playerId, removeCount, addCount, excludedId)
+        local data = EnsurePlayer(playerId)
+        local needed = GameConfig.InventoryCapacity.Enabled and
+            math.max(0, #data.ChickenOrder - removeCount + addCount - GameConfig.InventoryCapacity.Chickens) or 0
+        local candidates = {}
+        if needed == 0 then return candidates end
+        for _, id in ipairs(data.ChickenOrder) do
+            if id ~= excludedId then candidates[#candidates + 1] = data.Chickens[id] end
+        end
+        table.sort(candidates, function(a, b) return a.sequence < b.sequence end)
+        while #candidates > needed do table.remove(candidates) end
+        return candidates
+    end
+    local function MakeChickenSpace(playerId, removeCount, addCount, excludedId)
+        local economy = context.Services.EconomyService
+        for _, item in ipairs(OverflowChickens(playerId, removeCount, addCount, excludedId)) do
+            local price = economy:GetSalePrice(playerId, item)
+            local ok, reason = economy:SettleSale(playerId, economy:GetSessionGeneration(playerId), runtime, item.itemId, price)
+            if not ok then return false, reason end
+        end
+        return true
+    end
+    -- 礼包一次准备整组鸡及需出售的库存；返回纯Lua提交和延后通知。
+    function runtime:PrepareGiftChickens(playerId, types)
+        if not CanMutate(playerId) then return nil, "persistence_not_ready" end
+        local data = EnsurePlayer(playerId)
+        local sales = OverflowChickens(playerId, 0, #types)
+        local saleTotal = "0"
+        for _, item in ipairs(sales) do
+            saleTotal = Decimal.Add(saleTotal, context.Services.EconomyService:GetSalePrice(playerId, item))
+        end
+        local persistence = context.Services.PersistenceService
+        local archive = persistence and persistence:GetState(playerId)
+        local committed = false
+        return function()
+            if committed or context.Services.InventoryService ~= self or self.Players[playerId] ~= data
+                or not CanMutate(playerId) then return false, "inventory_unavailable" end
+            committed = true
+            for _, item in ipairs(sales) do
+                data.Chickens[item.itemId] = nil
+                for index, id in ipairs(data.ChickenOrder) do
+                    if id == item.itemId then table.remove(data.ChickenOrder, index); break end
+                end
+            end
+            local added = {}
+            for _, typeId in ipairs(types) do
+                local config = GameConfig.ChickenTypes[typeId]
+                self.GlobalSequence = self.GlobalSequence + 1
+                local itemId = "chicken:" .. string.format("%.0f", playerId) .. ":" .. string.format("%.0f", self.GlobalSequence)
+                local item = { itemId = itemId, kind = "Chicken", typeId = typeId, count = 1,
+                    finalSellPrice = config.ChickenSellPrice, displayName = config.DisplayName,
+                    iconIndex = config.ChickenIconIndex, sequence = self.GlobalSequence }
+                data.Chickens[itemId] = item
+                data.ChickenOrder[#data.ChickenOrder + 1] = itemId
+                added[#added + 1] = item
+            end
+            local published = false
+            return true, function()
+                if published then return end
+                published = true
+                PublishChanged(playerId, "gift_pack")
+                if not archive or not archive.ready then return end
+                for _, item in ipairs(added) do
+                    if context.Services.InventoryService ~= self or self.Players[playerId] ~= data
+                        or context.Services.PersistenceService ~= persistence then return end
+                    local current = persistence:GetState(playerId)
+                    if not current.ready or current.generation ~= archive.generation then return end
+                    local ok, err = pcall(function()
+                        System:SendToClient(playerId, context.NetMsg.Messages.ChickenObtained,
+                            { itemId = item.itemId, chickenType = item.typeId, generation = archive.generation })
+                    end)
+                    if not ok then Log:PrintError("[InventoryService] 礼包获得鸡提示失败，不补发", playerId, tostring(err)) end
+                end
+            end
+        end, saleTotal
     end
     -- 库存v2紧凑行：鸡为itemId/C/typeId/finalSellPrice；蛋为itemId/E/typeId/来源/基础价/缩放整数档/最终价。
     -- sequence从itemId无损还原，不重复保存；sequenceHighWater仍保留供放置档及后续身份分配使用。
@@ -269,7 +347,7 @@ function InventoryService:Start(context)
             return nil, "invalid_chicken_price"
         end
         if GameConfig.InventoryCapacity.Enabled then
-            local ok, reason = self:CheckCapacity(playerId, "Chicken", 0, 1)
+            local ok, reason = MakeChickenSpace(playerId, 0, 1)
             if not ok then
                 ObtainedDiag("add_reject", playerId, chickenType, nil, self.SessionIds[playerId], nil, reason)
                 return nil, reason
@@ -448,7 +526,10 @@ function InventoryService:Start(context)
             returnedCopy = CopyItem(returnedChicken)
         end
         if GameConfig.InventoryCapacity.Enabled then
-            local ok, reason = self:CheckCapacity(playerId, "Chicken", removedChicken and 1 or 0, returnedCopy and 1 or 0)
+            local ok, reason = MakeChickenSpace(playerId, removedChicken and 1 or 0, returnedCopy and 1 or 0, removeItemId)
+            if removedChicken then
+                for index, itemId in ipairs(data.ChickenOrder) do if itemId == removeItemId then removeIndex = index; break end end
+            end
             if not ok then return false, reason end
         end
 

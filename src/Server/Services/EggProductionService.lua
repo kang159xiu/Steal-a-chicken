@@ -293,7 +293,7 @@ function EggProductionService:Start(context)
             if not randomPosition or not origin then error("触发盒随机位置或世界原点不可用") end
             local target = Engine.Vector(randomPosition.X, randomPosition.Y, origin.Z)
             context.ElementCopy:CopyTree(chicken.config.TemplateRootId, target,
-                "家园产蛋:" .. tostring(house.homeId) .. ":" .. tostring(chicken.itemId), Complete)
+                "家园产蛋:" .. tostring(house.homeId) .. ":" .. tostring(chicken.itemId), Complete, nil, house.playerId)
         end)
         if not ok then Complete({ success = false, reason = tostring(errorMessage) }) end
     end

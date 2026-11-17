@@ -127,6 +127,7 @@ function TrackShopService:Start(context)
         if Integer(id) and type(request) == "table" and next(request) == nil then Send(id, true) end
     end)
     rt.Leave = Protect(function(id) CancelPresentation(id); rt.Sent[id] = nil; rt.Requests[id] = nil end)
+    context.Events:Subscribe(self.Name, "PlayerDataResetStarted", function(event) rt.Leave(event.playerId) end)
     rt.Notifies = { { messages.TrackShopAction, rt.Action }, { messages.TrackShopSnapshotRequest, rt.Snapshot } }
     for _, pair in ipairs(rt.Notifies) do System:BindNotify(pair[1], pair[2]) end
     rt.Bindings = { { Events.ON_PLAYER_PRELEAVE, rt.Leave }, { Events.ON_PLAYER_RECONNECTED, rt.Leave } }

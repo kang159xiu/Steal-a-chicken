@@ -25,6 +25,9 @@ local HomeCountController = require "Client.Controllers.HomeCountController"
 local HomeUpgradeController = require "Client.Controllers.HomeUpgradeController"
 local TreadmillController = require "Client.Controllers.TreadmillController"
 local RebirthController = require "Client.Controllers.RebirthController"
+local GiftPackController = require "Client.Controllers.GiftPackController"
+local SignInController = require "Client.Controllers.SignInController"
+local CoinPurchaseController = require "Client.Controllers.CoinPurchaseController"
 local MultiplierPurchaseController = require "Client.Controllers.MultiplierPurchaseController"
 local TrackShopController = require "Client.Controllers.TrackShopController"
 local EggGrowthController = require "Client.Controllers.EggGrowthController"
@@ -79,6 +82,9 @@ function GameClient:Init()
     self.Context.Manager:Register(TreadmillController)
     self.Context.Manager:Register(RebirthController)
     self.Context.Manager:Register(MultiplierPurchaseController)
+    self.Context.Manager:Register(CoinPurchaseController)
+    self.Context.Manager:Register(GiftPackController)
+    self.Context.Manager:Register(SignInController)
     self.Context.Manager:Register(TrackShopController)
     self.Context.Manager:Register(EggGrowthController)
     self.Context.Manager:Register(EggCollectionController)

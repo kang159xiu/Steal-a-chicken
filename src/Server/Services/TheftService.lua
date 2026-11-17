@@ -1,5 +1,6 @@
 local GameConfig = require "Common.Config.GameConfig"
 local Decimal = require "Common.DecimalInteger"
+local TheftDisplayPool = require "Server.TheftDisplayPool"
 
 local TheftService = {
     Name = "TheftService",
@@ -114,6 +115,7 @@ function TheftService:Start(context)
     local zone = context.Services.ZoneService
     local inventory = context.Services.InventoryService
     local hotbar = context.Services.HotbarService
+    local displayPool = TheftDisplayPool.new(context)
     local runtime = {
         Ready = false,
         Stopped = false,
@@ -131,6 +133,7 @@ function TheftService:Start(context)
         PendingByPlayer = {},
         OwnedDisplayByPlayer = {},
         OwnedDisplayRoots = {},
+        DisplayPool = displayPool,
         BeginCallback = nil,
         CompleteCallback = nil,
         CancelCallback = nil,
@@ -350,7 +353,7 @@ function TheftService:Start(context)
         if chicken.attackPlayerId then CancelEggAttack(chicken.attackPlayerId, false) end
         if chicken.growthTimerId then context.Timers:Remove(chicken.growthTimerId); chicken.growthTimerId = nil end
         if chicken.state == "Hatching" then Element:StopScaleTo(chicken.rootId) end
-        if chicken.eggRootId then context.ElementCopy:DestroyTree(chicken.eggRootId); chicken.eggRootId = nil end
+        if chicken.eggRootId then displayPool:Release(chicken.eggRootId); chicken.eggRootId = nil end
     end
     runtime.ClearHatch = ClearHatch
 
@@ -421,6 +424,15 @@ function TheftService:Start(context)
             if result.rootId and (accepted[result.rootId] or runtime.ChickensByRoot[result.rootId]
                 or runtime.OwnedDisplayRoots[result.rootId]
                 or (current and current.ChickensByRoot and current.ChickensByRoot[result.rootId])) then return end
+            -- 整树已纳入池时只归还，不逐节点销毁；租约避免旧回调回收复用后的实例。
+            local function ReturnPooled(rootId, lease, ids)
+                if rootId and displayPool:Release(rootId, lease) then
+                    cleaned[rootId] = true
+                    for _, id in ipairs(ids or {}) do cleaned[id] = true end
+                end
+            end
+            ReturnPooled(result.rootId, result.poolLease, result.spawnedIds)
+            ReturnPooled(result.eggRootId, result.eggPoolLease, result.eggSpawnedIds)
             -- 底层失败仅返回仍由调用方持有的部分实例；按生成逆序销毁一次，避免整树/子级重复清理。
             local ids, seen = {}, {}
             if result.rootId then ids[1], seen[result.rootId] = result.rootId, true end
@@ -493,8 +505,9 @@ function TheftService:Start(context)
             end
             local ok, reason = pcall(function()
                 Element:SetScale(result.rootId, Engine.Vector(config.HatchInitialScale, config.HatchInitialScale, config.HatchInitialScale))
-                context.ElementCopy:CopyTree(eggConfig.TemplateRootId, CopyPosition(position), "偷取区蛋", function(eggResult)
+                displayPool:Acquire("Egg", eggTypeId, eggConfig.TemplateRootId, CopyPosition(position), "偷取区蛋", function(eggResult)
                     result.eggSpawnedIds = eggResult.spawnedIds
+                    result.eggRootId, result.eggPoolLease = eggResult.rootId, eggResult.poolLease
                     if not Current() or completed then Cleanup(result); Cleanup(eggResult); return end
                     if not eggResult.success then
                         result.success, result.reason = false, "egg_copy_failed: " .. tostring(eggResult.reason)
@@ -511,7 +524,7 @@ function TheftService:Start(context)
             end
         end
         local ok, reason = pcall(function()
-            context.ElementCopy:CopyTree(templateId, CopyPosition(position),
+            displayPool:Acquire("Chicken", chickenType, templateId, CopyPosition(position),
                 "区域" .. tostring(region.RegionId) .. "生成点" .. tostring(pointId) .. "鸡", Finish)
         end)
         if not ok then
@@ -537,7 +550,7 @@ function TheftService:Start(context)
         ReleasePoint(chicken)
         runtime.ChickensByRoot[rootId] = nil
         SendWorldModels()
-        context.ElementCopy:DestroyTree(rootId)
+        if not displayPool:Release(rootId, nil, chicken.operation) then context.ElementCopy:DestroyTree(rootId) end
         local region = GameConfig.Regions[chicken.regionId]
         local candidates = {}
         for _, pointId in ipairs(FindSpawnPoints(region)) do
@@ -598,7 +611,7 @@ function TheftService:Start(context)
     RegisterSpawnedChicken = function(region, spawnPointId, chickenType, result, generation, registration)
         if runtime.Stopped or context.Services.TheftService ~= runtime
             or runtime.Generation ~= generation then
-            if result.success then context.ElementCopy:DestroyTree(result.rootId) end
+            if result.success then displayPool:Release(result.rootId, result.poolLease) end
             return
         end
         local chickenConfig = GameConfig.ChickenTypes[chickenType]
@@ -640,7 +653,7 @@ function TheftService:Start(context)
             eggTypeId = result.eggTypeId,
             state = "Egg",
             playerId = nil,
-            operation = 0,
+            operation = result.poolOperation,
         }
         ClaimPoint(runtime.ChickensByRoot[result.rootId])
         RecordDynamicChicken(runtime.ChickensByRoot[result.rootId], chickenConfig.TemplateRootId, generation, registration) -- DYNAMIC_DIAG
@@ -967,7 +980,7 @@ function TheftService:Start(context)
             chicken.attackPlayerId = nil
             chicken.state = "Hatching"
             SendEggAttackSignal(playerId, "停止破蛋动作")
-            context.ElementCopy:DestroyTree(chicken.eggRootId)
+            displayPool:Release(chicken.eggRootId)
             chicken.eggRootId = nil
             Element:ScaleTo(chicken.rootId, Engine.Vector(chicken.finalScale, chicken.finalScale, chicken.finalScale),
                 config.HatchGrowthSeconds, Element.CURVE.linear,
@@ -1128,6 +1141,7 @@ function TheftService:Start(context)
                 runtime.CarriedByPlayer[playerId] = rootId
                 chicken.state = "Carried"
                 chicken.manualRepickup = false
+                displayPool:TransferChicken(rootId, chicken.chickenType)
                 SendResult(playerId, rootId, true, "carried")
                 SendCarryState(playerId)
                 context.Events:Publish("ChickenCarried", {
@@ -1159,6 +1173,13 @@ function TheftService:Start(context)
             DropPlayerChicken(playerId, "fatal_damage")
             ClearOwnedDisplay(playerId, "fatal_damage")
         end
+    end
+    function runtime:ResetPlayer(playerId)
+        CancelEggAttack(playerId, true)
+        DropPlayerChicken(playerId, "data_reset")
+        ClearOwnedDisplay(playerId, "data_reset")
+        runtime.PendingByPlayer[playerId] = nil
+        ClearPlayerInteraction(playerId)
     end
     runtime.PreleaveCallback = function(playerId)
         if not IsPositiveInteger(playerId) then return end
@@ -1222,6 +1243,11 @@ function TheftService:Start(context)
                 or snapshot.operation ~= chicken.operation or not chicken.playerId then return end
             DropPlayerChicken(chicken.playerId, "guardian_caught")
         end)
+        runtime.UsePropCallback = ProtectCallback("尖叫鸭使用回调失败", function(playerId, propId)
+            if propId ~= 1106022000000000 or runtime.Stopped or context.Services.TheftService ~= runtime then return end
+            System:SendToClient(playerId, context.NetMsg.Messages.EggBreakScan, {})
+        end)
+        System:RegisterEvent(Events.ON_PLAYER_USE_PROP, runtime.UsePropCallback)
         System:RegisterEvent(Events.ON_BEFORE_CHARACTER_TAKE_HURT, runtime.BeforeHurtCallback)
         System:RegisterEvent(Events.ON_CHARACTER_TAKE_FATAL_DAMAGE, runtime.FatalDamageCallback)
         System:RegisterEvent(Events.ON_PLAYER_PRELEAVE, runtime.PreleaveCallback)
@@ -1275,7 +1301,9 @@ function TheftService:Start(context)
         context.Timers:AddFrame(TheftService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
             if self.Stopped or context.Services.TheftService ~= self
                 or self.Generation ~= generation then return end
-            for rootId in pairs(oldChickens) do context.ElementCopy:DestroyTree(rootId) end
+            for rootId, chicken in pairs(oldChickens) do
+                if not displayPool:Release(rootId, nil, chicken.operation) then context.ElementCopy:DestroyTree(rootId) end
+            end
             self.RefreshRoots = nil
             context.Timers:AddFrame(TheftService.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
                 if self.Stopped or context.Services.TheftService ~= self
@@ -1352,15 +1380,31 @@ function TheftService:Start(context)
         SpawnNextRegion()
         return generation
     end
+    local function StartInitialGeneration()
+        if runtime.Stopped or context.Services.TheftService ~= runtime then
+            GenerationDiagnostic("startup_timer_skip_stopped_or_replaced", runtime)
+            return
+        end
+        local persistence = context.Services.PersistenceService
+        if GameConfig.Persistence.ProductionEnabled
+            and not (persistence and persistence.InitialHomeLoadsCompleted) then
+            GenerationDiagnostic("startup_waiting_home_loads", runtime)
+            return
+        end
+        if runtime.Generation ~= 0 then
+            GenerationDiagnostic("startup_timer_skip_generation_not_zero", runtime)
+            return
+        end
+        runtime:GenerateRegions()
+    end
+    if GameConfig.Persistence.ProductionEnabled then
+        context.Events:Subscribe(TheftService.Name, "HomeInitialLoadsCompleted", StartInitialGeneration)
+    end
     GenerationDiagnostic("startup_timer_register", runtime)
     context.Timers:AddTimer(TheftService.Name,
         GameConfig.Runtime.ServerReadyDelaySeconds, function()
             GenerationDiagnostic("startup_timer_fire", runtime)
-            if runtime.Stopped or context.Services.TheftService ~= runtime then
-                GenerationDiagnostic("startup_timer_skip_stopped_or_replaced", runtime)
-                return end
-            if runtime.Generation == 0 then runtime:GenerateRegions()
-            else GenerationDiagnostic("startup_timer_skip_generation_not_zero", runtime) end
+            StartInitialGeneration()
         end)
     GenerationDiagnostic("startup_timer_registered", runtime)
 
@@ -1371,6 +1415,7 @@ function TheftService:Stop(context)
     local runtime = context.Services.TheftService
     if not runtime then return end
     runtime.Stopped = true
+    context.Events:UnsubscribeOwner(self.Name)
     runtime.DynamicChickenDiagnostic = nil -- DYNAMIC_DIAG
     for _, chicken in pairs(runtime.ChickensByRoot) do
         runtime.ClearHatch(chicken)
@@ -1397,9 +1442,12 @@ function TheftService:Stop(context)
     end
     for rootId in pairs(runtime.RefreshRoots or {}) do
         pcall(function() Element:UnBinding(rootId) end)
-        context.ElementCopy:DestroyTree(rootId)
+        if not runtime.DisplayPool:Has(rootId) then context.ElementCopy:DestroyTree(rootId) end
     end
     runtime.RefreshRoots = nil
+    if runtime.UsePropCallback then
+        System:UnregisterEvent(Events.ON_PLAYER_USE_PROP, runtime.UsePropCallback)
+    end
     if runtime.BeforeHurtCallback then
         System:UnregisterEvent(Events.ON_BEFORE_CHARACTER_TAKE_HURT, runtime.BeforeHurtCallback)
     end
@@ -1426,7 +1474,7 @@ function TheftService:Stop(context)
     end
     for rootId in pairs(runtime.ChickensByRoot) do
         pcall(function() Element:UnBinding(rootId) end)
-        context.ElementCopy:DestroyTree(rootId)
+        if not runtime.DisplayPool:Has(rootId) then context.ElementCopy:DestroyTree(rootId) end
     end
     for rootId in pairs(runtime.OwnedDisplayRoots) do
         pcall(function() Element:UnBinding(rootId) end)
@@ -1435,6 +1483,7 @@ function TheftService:Stop(context)
     runtime.ChickensByRoot = {}
     runtime.OwnedDisplayByPlayer = {}
     runtime.OwnedDisplayRoots = {}
+    runtime.DisplayPool:Stop()
     context.Services.TheftService = nil
 end
 

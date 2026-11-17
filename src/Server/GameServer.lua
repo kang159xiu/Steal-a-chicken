@@ -16,6 +16,9 @@ local PlayerSpeedService = require "Server.Services.PlayerSpeedService"
 local TreadmillService = require "Server.Services.TreadmillService"
 local RebirthService = require "Server.Services.RebirthService"
 local PurchaseService = require "Server.Services.PurchaseService"
+local GiftPackService = require "Server.Services.GiftPackService"
+local SignInService = require "Server.Services.SignInService"
+local CoinPurchaseService = require "Server.Services.CoinPurchaseService"
 local MultiplierPurchaseService = require "Server.Services.MultiplierPurchaseService"
 local TrackShopService = require "Server.Services.TrackShopService"
 local PlacementService = require "Server.Services.PlacementService"
@@ -83,6 +86,9 @@ function GameServer:Init()
     self.Context.Manager:Register(PurchaseService)
     self.Context.Manager:Register(RebirthService)
     self.Context.Manager:Register(MultiplierPurchaseService)
+    self.Context.Manager:Register(CoinPurchaseService)
+    self.Context.Manager:Register(GiftPackService)
+    self.Context.Manager:Register(SignInService)
     self.Context.Manager:Register(TrackShopService)
     self.Context.Manager:Register(HomeUpgradeService)
     self.Context.Manager:Register(SellShopService)

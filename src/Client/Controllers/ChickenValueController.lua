@@ -1,6 +1,7 @@
 local GameConfig = require "Common.Config.GameConfig"
 local Decimal = require "Common.DecimalInteger"
 local EggModelText = require "Common.EggModelText"
+local RestoreDiag = require "Common.Debug.HomeModelRestoreDiag"
 local ChickenValueController = { Name = "ChickenValueController" }
 function ChickenValueController:Start(context)
     if context.Side ~= "Client" then return end
@@ -45,7 +46,17 @@ function ChickenValueController:Start(context)
     local function Queue(record)
         if not rt.Ready then return end
         context.Timers:AddFrame(self.Name, GameConfig.Runtime.EngineOperationDelayFrames, function()
-            if not Current(record) then return end
+            if not Current(record) then
+                if record.owner.source == "placement" then
+                    RestoreDiag.Log("Client", "placement", "sample_skipped", { playerId = record.owner.playerId,
+                        rootId = record.rootId, reason = "stopped_or_old_model" })
+                end
+                return
+            end
+            if record.owner.source == "placement" then
+                RestoreDiag.Sample("Client", "placement", "after_settle_frames", { playerId = record.owner.playerId,
+                    rootId = record.rootId, version = record.owner.version, chickenType = record.chickenType })
+            end
             local visited = {}
             local function Visit(elementId, worldEgg)
                 if not Current(record) or visited[elementId] then return end
@@ -97,19 +108,39 @@ function ChickenValueController:Start(context)
         end)
     end
     rt.Callback = function(_, message)
+        local function Diag(stage, reason)
+            RestoreDiag.Log("Client", "placement", stage, function()
+                if type(message) ~= "table" or message.source ~= "placement" then return { ignoredSource = true } end
+                local ids = {}; for _, model in ipairs(message.models or {}) do ids[#ids + 1] = tostring(model.rootId) end
+                return { playerId = message.playerId, version = message.version, count = #(message.models or {}),
+                    rootIds = table.concat(ids, ","), ready = rt.Ready, reason = reason }
+            end)
+        end
+        if type(message) == "table" and message.source == "placement" then Diag("models_received") end
         if not Active() or type(message) ~= "table" or (message.source ~= "placement"
             and message.source ~= "hotbar" and message.source ~= "world")
-            or type(message.playerId) ~= "number" or type(message.version) ~= "number" or type(message.models) ~= "table" then return end
+            or type(message.playerId) ~= "number" or type(message.version) ~= "number" or type(message.models) ~= "table" then
+            if type(message) == "table" and message.source == "placement" then Diag("models_rejected", "inactive_or_invalid_payload") end
+            return
+        end
         local key = message.source .. ":" .. string.format("%.0f", message.playerId)
         local source = rt.Sources[key]
-        if source and message.version <= source.version then return end
+        if source and message.version <= source.version then
+            if message.source == "placement" then Diag("models_rejected", "old_or_duplicate_version") end; return
+        end
         local nextModels = {}
         for _, model in ipairs(message.models) do
             if type(model) ~= "table" or type(model.rootId) ~= "number" or model.rootId <= 0 or model.rootId ~= math.floor(model.rootId)
-                or not Decimal.FromSafeInteger(model.finalSellPrice) or nextModels[model.rootId] then return end
+                or not Decimal.FromSafeInteger(model.finalSellPrice) or nextModels[model.rootId] then
+                if message.source == "placement" then Diag("models_rejected", "invalid_or_duplicate_model") end; return
+            end
             if model.kind == "Egg" then
-                if message.source ~= "hotbar" or type(model.eggTypeId) ~= "string" or not EggConfig(model.eggTypeId) then return end
-            elseif type(model.chickenType) ~= "string" or not GameConfig.ChickenTypes[model.chickenType] then return end
+                if message.source ~= "hotbar" or type(model.eggTypeId) ~= "string" or not EggConfig(model.eggTypeId) then
+                    if message.source == "placement" then Diag("models_rejected", "unexpected_egg_model") end; return
+                end
+            elseif type(model.chickenType) ~= "string" or not GameConfig.ChickenTypes[model.chickenType] then
+                if message.source == "placement" then Diag("models_rejected", "unknown_chicken_type") end; return
+            end
             if message.source == "world" and (type(model.operation) ~= "number" or model.operation < 0
                 or model.operation ~= math.floor(model.operation) or type(model.generation) ~= "number"
                 or (model.countdownEndMs ~= nil and (type(model.countdownEndMs) ~= "number"
@@ -117,7 +148,9 @@ function ChickenValueController:Start(context)
             nextModels[model.rootId] = model
         end
         source = source or { models = {} }
+        if message.source == "placement" then source.source, source.playerId = message.source, message.playerId end
         rt.Sources[key], source.version = source, message.version
+        if message.source == "placement" then Diag("models_accepted") end
         for rootId, record in pairs(source.models) do
             if not nextModels[rootId] and rt.Roots[rootId] == record then rt.Roots[rootId] = nil end
         end

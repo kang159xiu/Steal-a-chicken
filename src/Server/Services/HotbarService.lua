@@ -281,12 +281,18 @@ function HotbarService:Start(context)
                     end)
                 end)
             end
-        )
+        , nil, playerId)
         return true
     end
 
     function runtime:CancelSelection(playerId, reason)
         return CancelSelection(playerId, reason, nil, true)
+    end
+    function runtime:ResetPlayer(playerId, completed)
+        CancelSelection(playerId, "data_reset", function()
+            runtime.States[playerId] = nil
+            completed()
+        end, true)
     end
 
     function runtime:AdoptExistingDisplay(playerId, itemId, rootId)

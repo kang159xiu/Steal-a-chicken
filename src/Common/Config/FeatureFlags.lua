@@ -23,6 +23,9 @@ local FeatureFlags = {
         "Purchase",
         "Prompt",
         "MultiplierPurchase",
+        "CoinPurchase",
+        "GiftPacks",
+        "SignIn",
         "TrackShop",
     },
 
@@ -47,6 +50,9 @@ local FeatureFlags = {
         Purchase = { Server = true, Client = false },
         Prompt = { Server = false, Client = true },
         MultiplierPurchase = { Server = true, Client = true },
+        CoinPurchase = { Server = true, Client = true },
+        GiftPacks = { Server = true, Client = true },
+        SignIn = { Server = true, Client = true },
         TrackShop = { Server = true, Client = true },
     },
 
@@ -76,6 +82,9 @@ local FeatureFlags = {
         Purchase = true,
         Prompt = true,
         MultiplierPurchase = true,
+        CoinPurchase = true,
+        GiftPacks = true,
+        SignIn = true,
         TrackShop = true,
     },
 }

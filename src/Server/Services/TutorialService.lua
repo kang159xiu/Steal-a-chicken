@@ -76,6 +76,7 @@ function TutorialService:Start(context)
     end
     local function Update(id, force)
         if not Active() then return end
+        if not persistence:IsReady(id) then return end
         local state = rt.Players[id]
         if not state then return end
         if rt.Completed[id] and state.step ~= "Done" then Send(id, state, "Hidden", nil, nil, force); return end
@@ -121,6 +122,10 @@ function TutorialService:Start(context)
     local function On(event, callback)
         context.Events:Subscribe(self.Name, event, callback)
     end
+    On("PlayerDataResetStarted", function(event)
+        local state = rt.Players[event.playerId]
+        if state then Send(event.playerId, state, "Hidden", nil, nil, true) end
+    end)
     persistence:RegisterAdapter("tutorial", {
         Export = function(id) return { completed = rt.Completed[id] == true } end,
         Restore = function(id, data, done)

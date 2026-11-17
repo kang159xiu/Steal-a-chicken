@@ -64,9 +64,9 @@ function PromptController:Start(context)
         end
         return path
     end
-    function rt:Show(text)
+    function rt:Show(text, visibleSeconds)
         if not Active() or type(text) ~= "string" or text == "" then return false end
-        if not self.Ready then self.QueuedText = text; return false end
+        if not self.Ready then self.QueuedText, self.QueuedSeconds = text, visibleSeconds; return false end
         local previous = self.Current
         if previous and previous.text == text then return false end
         if previous then Hide(previous) end
@@ -92,7 +92,7 @@ function PromptController:Start(context)
             end)
             if not landed then Destroy(copy); return end
             copy.phase = "shown"
-            copy.display = context.Timers:AddTimer(PromptController.Name, c.VisibleSeconds, function()
+            copy.display = context.Timers:AddTimer(PromptController.Name, visibleSeconds or c.VisibleSeconds, function()
                 if Current(copy) and copy.epoch == epoch and copy.phase == "shown" then copy.display = nil; Hide(copy) end
             end)
         end)
@@ -110,12 +110,13 @@ function PromptController:Start(context)
             local found, path = Call("source_text_path", ReadPath)
             if not found then return end
             rt.TextPath, rt.Ready = path, true
-            local queued = rt.QueuedText; rt.QueuedText = nil
-            if queued then rt:Show(queued) end
+            local queued, seconds = rt.QueuedText, rt.QueuedSeconds
+            rt.QueuedText, rt.QueuedSeconds = nil, nil
+            if queued then rt:Show(queued, seconds) end
         end)
     end)
     rt.Cleanup = function()
-        rt.Active = false; rt.QueuedText = nil
+        rt.Active = false; rt.QueuedText, rt.QueuedSeconds = nil, nil
         context.Timers:RemoveOwner(self.Name)
         local copies = {}; for _, copy in pairs(rt.Copies) do copies[#copies + 1] = copy end
         for _, copy in ipairs(copies) do Destroy(copy) end

@@ -275,7 +275,7 @@ function PickupController:Start(context)
     local function CreateIndicator()
         IndicatorLog("copy_begin", "indicatorRoot:", runtime.IndicatorRoot or "nil")
         local ok, reason = pcall(function()
-            context.ElementCopy:CopyTree(config.PickupIndicatorSourceId, Engine.Vector(0, 0, 0), "拾取目标指示", function(result)
+            context.ElementCopy:CopyTree(config.PickupIndicatorSourceId, Engine.Vector(0, 0, -5000), "拾取目标指示", function(result)
                 pcall(function() IndicatorLog("copy_result", "success:", result.success, "actualRoot:", tostring(result.rootId),
                     "reason:", tostring(result.reason), "currentRuntime:", context.Services.PickupController == runtime,
                     "disabled:", runtime.IndicatorDisabled) end)
@@ -462,8 +462,10 @@ function PickupController:Start(context)
         if Current(token) then UI:OnShow({ config.PickupUiGroupId }, true) end
     end
 
-    local function ScanTargets()
+    local function ScanTargets(eggsOnly)
         if context.Services.PickupController ~= runtime then return end
+        if eggsOnly and (not runtime.CarryReady or not runtime.InStolenArea or runtime.CarryRootId
+            or runtime.RefreshBlocked or runtime.BreakToken or runtime.Holding or runtime.AwaitingResult) then return end
         if not runtime.CarryReady or not runtime.InStolenArea or runtime.CarryRootId or runtime.RefreshBlocked then
             CancelBreak()
             if runtime.TargetToken then CancelInteraction(runtime.TargetToken, "not_in_stolen_area") end
@@ -475,6 +477,7 @@ function PickupController:Start(context)
         if context.Services.PickupController ~= runtime or runtime.TargetToken ~= token
             or generation ~= runtime.WorldGeneration or version ~= runtime.WorldVersion then return end
         if not ok or not playerPosition then
+            if eggsOnly then return end
             CancelBreak()
             if token then CancelInteraction(token, "position_unavailable") end
             RenderIndicator(nil)
@@ -506,9 +509,10 @@ function PickupController:Start(context)
         if runtime.AwaitingResult then RenderIndicator(nil) return end
         local nearestDistance, nearestRoot, nearestModel, nearestPosition
         local function Consider(rootId, model)
+            if eggsOnly and model.state ~= "Egg" then return end
             local distance = PickupDistanceSquared(playerPosition, model.position)
             if distance > maxDistanceSquared then runtime.BreakDenied[rootId] = nil; return end
-            if model.state == "EggAttacking" or runtime.BreakDenied[rootId] == model then return end
+            if model.state == "EggAttacking" or (not eggsOnly and runtime.BreakDenied[rootId] == model) then return end
             if distance <= maxDistanceSquared and (not nearestDistance or distance < nearestDistance
                 or distance == nearestDistance and rootId < nearestRoot) then
                 nearestDistance, nearestRoot, nearestModel, nearestPosition = distance, rootId, model, model.position
@@ -516,11 +520,14 @@ function PickupController:Start(context)
         end
         -- 两个索引在合法完整快照到达时重建；普通鸡与掉落鸡按根身份互斥。
         for rootId, model in pairs(runtime.AvailableByRegion[runtime.RegionId] or {}) do Consider(rootId, model) end
-        for rootId, model in pairs(runtime.DroppedModels) do Consider(rootId, model) end
+        if not eggsOnly then
+            for rootId, model in pairs(runtime.DroppedModels) do Consider(rootId, model) end
+        end
         if context.Services.PickupController ~= runtime or runtime.TargetToken ~= token
             or generation ~= runtime.WorldGeneration or version ~= runtime.WorldVersion
             or not runtime.InStolenArea or runtime.CarryRootId or runtime.AwaitingResult or runtime.RefreshBlocked then return end
         if not nearestRoot then
+            if eggsOnly then return end
             if token then CancelInteraction(token, "target_not_available") end
             RenderIndicator(nil)
             return
@@ -538,6 +545,10 @@ function PickupController:Start(context)
         end
         SelectTarget(nearestRoot, nearestModel)
         if runtime.TargetToken and runtime.TargetToken.rootId == nearestRoot then RenderIndicator(nearestPosition) end
+    end
+
+    runtime.EggBreakScanCallback = function()
+        Run("尖叫鸭开蛋扫描", function() ScanTargets(true) end)
     end
 
     runtime.ZoneCallback = function(_, message)
@@ -674,6 +685,7 @@ function PickupController:Start(context)
     UI:OnShow({ config.PickupUiGroupId }, false)
     System:BindNotify(context.NetMsg.Messages.ChickenModelState, runtime.ModelStateCallback)
     System:BindNotify(context.NetMsg.Messages.EggBreakResult, runtime.EggBreakResultCallback)
+    System:BindNotify(context.NetMsg.Messages.EggBreakScan, runtime.EggBreakScanCallback)
     System:BindNotify(context.NetMsg.Messages.ZoneState, runtime.ZoneCallback)
     System:BindNotify(context.NetMsg.Messages.PickupResult, runtime.ResultCallback)
     System:BindNotify(context.NetMsg.Messages.TheftCarryState, runtime.CarryStateCallback)
@@ -706,6 +718,7 @@ function PickupController:Stop(context)
     if not runtime then return end
     runtime.CleanupEggAttack()
     System:UnbindNotify(context.NetMsg.Messages.EggBreakResult, runtime.EggBreakResultCallback)
+    System:UnbindNotify(context.NetMsg.Messages.EggBreakScan, runtime.EggBreakScanCallback)
     context.Services.PickupController = nil
     runtime.DynamicChickenDiagnostic = nil -- DYNAMIC_DIAG
     runtime.TargetToken = nil
